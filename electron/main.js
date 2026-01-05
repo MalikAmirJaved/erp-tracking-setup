@@ -1,5 +1,5 @@
 // electron/main.js
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, screen } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -58,18 +58,28 @@ async function autoStartTracking() {
 }
 
 function createWindow() {
+  const { width: screenWidth, height: screenHeight } =
+    screen.getPrimaryDisplay().workAreaSize;
+
+  const winWidth = Math.round(screenWidth * 0.2);  // 20%
+  const winHeight = Math.round(screenHeight * 0.15); // 15%
+
   mainWindow = new BrowserWindow({
-    width: 400,
-    height: 600,
+    width: winWidth,
+    height: winHeight,
+    x: screenWidth - winWidth - 30,
+    y: screenHeight - winHeight - 80,
+    frame: false,
     resizable: false,
-    frame: false,                  // Removes title bar + close/minimize buttons
-    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    transparent: false,
+    backgroundColor: "#FFFFFF",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
       nodeIntegration: false,
-      contextIsolation: true
     },
-    icon: path.join(__dirname, "icon.ico") // Optional: add your icon
   });
 
   if (app.isPackaged) {
