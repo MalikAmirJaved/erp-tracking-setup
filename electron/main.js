@@ -1,93 +1,91 @@
 // electron/main.js
-const { app, BrowserWindow, Tray, Menu, ipcMain, screen, shell } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const fs = require("fs");
-require("dotenv").config();
 
 let mainWindow;
 let tray;
 let trackerProcess = null;
 
 function startGoTracker() {
-  const trackerPath = path.join(__dirname, "go", "tracker.exe");
+  let trackerPath;
 
-  // Check if the file exists first
+  if (app.isPackaged) {
+    // In packaged app: extraResources are next to app.asar
+    trackerPath = path.join(process.resourcesPath, "go", "tracker.exe");
+  } else {
+    // In development
+    trackerPath = path.join(__dirname, "go", "tracker.exe");
+  }
+
   if (!fs.existsSync(trackerPath)) {
     console.error(`Go tracker binary not found at: ${trackerPath}`);
-    // Optional: show a dialog or toast in renderer later
+    // Optional: show toast or dialog to user
     return;
   }
 
   console.log(`Starting Go tracker: ${trackerPath}`);
 
-  // Spawn the process (detached so it keeps running even if Electron closes)
   trackerProcess = spawn(trackerPath, [], {
-    detached: true,
-    stdio: "inherit",           // forward logs to Electron console
-    windowsHide: true,          // hide console window on Windows
+    detached: false,
+    stdio: "ignore",
+    windowsHide: true
   });
 
-  trackerProcess.on("error", (err) => {
-    console.error("Failed to start tracker.exe:", err);
-  });
-
-  trackerProcess.on("close", (code) => {
-    console.log(`tracker.exe exited with code ${code}`);
-    trackerProcess = null;
-  });
-
-  // Optional: kill child process when app quits
-  app.on("before-quit", () => {
-    if (trackerProcess) {
-      console.log("Killing tracker.exe on app quit...");
-      trackerProcess.kill();
-    }
-  });
+  trackerProcess.unref();
 }
 
-const createWindow = () => {
-  const { width: screenWidth, height: screenHeight } =
-    screen.getPrimaryDisplay().workAreaSize;
+async function autoStartTracking() {
+  let attempts = 0;
+  const maxAttempts = 15;
 
-  const winWidth = Math.round(screenWidth * 0.2);   // 20%
-  const winHeight = Math.round(screenHeight * 0.15); // 15%
+  while (attempts < maxAttempts) {
+    try {
+      const res = await fetch("http://localhost:9090/start", { method: "POST" });
+      if (res.ok && (await res.text()) === "success") {
+        console.log("✅ Screenshot capture auto-started");
+        mainWindow?.webContents.send("tracking-started");
+        return;
+      }
+    } catch (err) {
+      console.log("Go tracker not ready, retrying in 1s...");
+    }
+    attempts++;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  console.error("Failed to auto-start tracking");
+}
 
+function createWindow() {
   mainWindow = new BrowserWindow({
-    width: winWidth,
-    height: winHeight,
-    x: screenWidth - winWidth - 30,
-    y: screenHeight - winHeight - 80,
-    frame: false,
+    width: 400,
+    height: 600,
     resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    transparent: false,
-    backgroundColor: "#FFFFFF",
+    frame: false,                  // Removes title bar + close/minimize buttons
+    transparent: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
       nodeIntegration: false,
+      contextIsolation: true
     },
+    icon: path.join(__dirname, "icon.ico") // Optional: add your icon
   });
 
   if (app.isPackaged) {
     mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
   } else {
-    mainWindow.loadURL(process.env.VITE_REACT_APP_API_URL); // ← adjust if your Vite port is different
-    mainWindow.webContents.openDevTools(); // helpful during dev
+    mainWindow.loadURL("http://localhost:4000");
+    mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
-  mainWindow.on("close", (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
-    }
+  mainWindow.on("closed", () => {
+    mainWindow = null;
   });
-};
+}
 
-const createTray = () => {
-  const iconPath = path.join(__dirname, "icon.png");
+function createTray() {
+  const iconPath = path.join(__dirname, "icon.png"); // Add your tray icon (orange)
 
   if (!fs.existsSync(iconPath)) {
     console.error("Tray icon not found:", iconPath);
@@ -95,46 +93,40 @@ const createTray = () => {
   }
 
   tray = new Tray(iconPath);
-  tray.setToolTip("Time Tracker");
+  tray.setToolTip("Tracker Test");
 
   const contextMenu = Menu.buildFromTemplate([
     { label: "Show", click: () => mainWindow.show() },
-    { label: "Quit", click: () => {
-        app.isQuitting = true;
-        app.quit();
-      }
-    },
+    { label: "Quit", click: () => app.quit() }
   ]);
 
   tray.setContextMenu(contextMenu);
-
   tray.on("click", () => {
     mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
   });
-};
+}
 
 ipcMain.on("hide-window", () => {
   mainWindow?.hide();
 });
 
 app.whenReady().then(() => {
-  // 1. Start the Go tracker first
   startGoTracker();
-
-  // 2. Then create window & tray
   createWindow();
   createTray();
+  setTimeout(autoStartTracking, 1500); // Auto-start screenshots
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
 app.on("before-quit", () => {
-  app.isQuitting = true;
   if (trackerProcess) {
-    trackerProcess.kill();
+    trackerProcess.kill(); // Kill Go process to avoid "cannot be closed" during reinstall
   }
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
 });

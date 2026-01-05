@@ -31,7 +31,16 @@ const TimeTracker = () => {
       .toString()
       .padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
-
+useEffect(() => {
+  if (window.electronAPI?.onTrackingStarted) {
+    window.electronAPI.onTrackingStarted(() => {
+      // Simulate successful start – update Redux to active state
+      dispatch({
+        type: "tracker/startTracking/fulfilled"
+      });
+    });
+  }
+}, [dispatch]);
   const displayTime = (() => {
     if (status !== "active" || !startTime) return formatTime(time);
     const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
@@ -53,7 +62,6 @@ const TimeTracker = () => {
 
   return (
     <div className="h-screen w-screen bg-white flex flex-col select-none overflow-hidden ">
-
       {/* Draggable orange title bar */}
       <div
         style={{ WebkitAppRegion: "drag" }}
@@ -84,17 +92,17 @@ const TimeTracker = () => {
                 {displayTime}
               </span>
             </div>
-          {startTime && status !== "inactive" && (
-            <div className="px-5 ">
-              <p className="w-full justify-end items-center gap-2 flex  ">
-                Started{" "}
-                {new Date(startTime).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </p>
-            </div>
-          )}
+            {startTime && status !== "inactive" && (
+              <div className="px-5 ">
+                <p className="w-full justify-end items-center gap-2 flex  ">
+                  Started{" "}
+                  {new Date(startTime).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </p>
+              </div>
+            )}
           </div>
         </div>
 

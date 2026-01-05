@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "main": "electron/main.js",
+  "productName": "Tracker Test",
   "scripts": {
     "dev": "vite",
     "electron": "electron .",
@@ -53,6 +54,11 @@
       "target": [
         "nsis"
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     },
     "asar": true,
     "forceCodeSigning": false
