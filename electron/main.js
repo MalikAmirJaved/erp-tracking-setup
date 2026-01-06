@@ -8,34 +8,7 @@ let mainWindow;
 let tray;
 let trackerProcess = null;
 
-function startGoTracker() {
-  let trackerPath;
-
-  if (app.isPackaged) {
-    // In packaged app: extraResources are next to app.asar
-    trackerPath = path.join(process.resourcesPath, "go", "tracker.exe");
-  } else {
-    // In development
-    trackerPath = path.join(__dirname, "go", "tracker.exe");
-  }
-
-  if (!fs.existsSync(trackerPath)) {
-    console.error(`Go tracker binary not found at: ${trackerPath}`);
-    // Optional: show toast or dialog to user
-    return;
-  }
-
-  console.log(`Starting Go tracker: ${trackerPath}`);
-
-  trackerProcess = spawn(trackerPath, [], {
-    detached: false,
-    stdio: "ignore",
-    windowsHide: true
-  });
-
-  trackerProcess.unref();
-}
-
+// electron/main.js - Update the autoStartTracking function
 async function autoStartTracking() {
   let attempts = 0;
   const maxAttempts = 15;
@@ -45,7 +18,9 @@ async function autoStartTracking() {
       const res = await fetch("http://localhost:9090/start", { method: "POST" });
       if (res.ok && (await res.text()) === "success") {
         console.log("✅ Screenshot capture auto-started");
-        mainWindow?.webContents.send("tracking-started");
+        
+        // Send message to renderer to update UI state
+        mainWindow?.webContents.send("auto-tracking-started");
         return;
       }
     } catch (err) {
@@ -55,6 +30,53 @@ async function autoStartTracking() {
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   console.error("Failed to auto-start tracking");
+}
+
+// Also update the startGoTracker function to handle edge cases better
+function startGoTracker() {
+  let trackerPath;
+
+  if (app.isPackaged) {
+    trackerPath = path.join(process.resourcesPath, "go", "tracker.exe");
+  } else {
+    trackerPath = path.join(__dirname, "go", "tracker.exe");
+  }
+
+  if (!fs.existsSync(trackerPath)) {
+    console.error(`Go tracker binary not found at: ${trackerPath}`);
+    
+    // Show error dialog in production
+    if (app.isPackaged) {
+      dialog.showErrorBox(
+        "Tracker Binary Missing",
+        "The screenshot capture module could not be found. Please reinstall the application."
+      );
+    }
+    return;
+  }
+
+  console.log(`Starting Go tracker: ${trackerPath}`);
+
+  try {
+    trackerProcess = spawn(trackerPath, [], {
+      detached: false,
+      stdio: "ignore",
+      windowsHide: true
+    });
+
+    trackerProcess.on("error", (err) => {
+      console.error("Failed to start tracker process:", err);
+    });
+
+    trackerProcess.on("exit", (code) => {
+      console.log(`Tracker process exited with code ${code}`);
+      trackerProcess = null;
+    });
+
+    trackerProcess.unref();
+  } catch (error) {
+    console.error("Error starting tracker:", error);
+  }
 }
 
 function createWindow() {

@@ -101,7 +101,19 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("stopped"))
 	})
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		running := isRunning
+		mu.Unlock()
 
+		if running {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("running"))
+		} else {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("stopped"))
+		}
+	})
 	// Wrap with CORS middleware
 	handler := corsMiddleware(mux)
 

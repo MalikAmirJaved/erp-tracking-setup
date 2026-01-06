@@ -44,6 +44,43 @@ export const stopTracking = createAsyncThunk(
   }
 );
 
+export const checkTrackingStatus = createAsyncThunk(
+  "tracker/checkStatus",
+  async (_, { rejectWithValue }) => {
+    try {
+      const res = await fetch(`${API_URL}/status`, { method: "GET" });
+      if (res.ok) {
+        const text = await res.text();
+        return text === "running";
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+);
+
+// Add a break tracking thunk to stop/start the Go tracker
+export const toggleBreakTracking = createAsyncThunk(
+  "tracker/toggleBreak",
+  async (isBreak, { rejectWithValue }) => {
+    try {
+      if (isBreak) {
+        // Stop tracking during break
+        const res = await fetch(`${API_URL}/stop`, { method: "POST" });
+        if (!res.ok) throw new Error("Failed to stop");
+        return "break";
+      } else {
+        // Resume tracking
+        const res = await fetch(`${API_URL}/start`, { method: "POST" });
+        if (!res.ok) throw new Error("Failed to start");
+        return "active";
+      }
+    } catch (error) {
+      return rejectWithValue(error.message);
+    }
+  }
+);
 const trackerSlice = createSlice({
   name: "tracker",
   initialState: {
@@ -52,6 +89,7 @@ const trackerSlice = createSlice({
     startTime: null,
     loading: false,
     permissionGranted: null,
+    isAutoStarted: false,
   },
   reducers: {
     setBreakMode: (state) => {
@@ -61,7 +99,17 @@ const trackerSlice = createSlice({
       state.status = "inactive";
       state.time = 0;
       state.startTime = null;
+      state.isAutoStarted = false;
     },
+    // Add a new reducer for auto-start
+    setAutoStarted: (state) => {
+      state.status = "active";
+      state.startTime = new Date().toISOString();
+      state.time = 0;
+      state.isAutoStarted = true;
+    },
+
+
   },
   extraReducers: (builder) => {
     builder
@@ -97,9 +145,28 @@ const trackerSlice = createSlice({
         state.time = 0;
         state.startTime = null;
 
+      })
+      .addCase(toggleBreakTracking.pending, (state) => {
+        state.loading = true;
+      })
+      .addCase(toggleBreakTracking.fulfilled, (state, action) => {
+        state.loading = false;
+        state.status = action.payload;
+        // Don't reset timer when breaking/resuming
+      })
+      .addCase(toggleBreakTracking.rejected, (state) => {
+        state.loading = false;
+        // Keep current status on error
+      })
+      .addCase(checkTrackingStatus.fulfilled, (state, action) => {
+        if (action.payload && state.status === "inactive") {
+          state.status = "active";
+          state.startTime = new Date().toISOString();
+          state.isAutoStarted = true;
+        }
       });
   },
 });
 
-export const { setBreakMode, resetTracker } = trackerSlice.actions;
+export const { setBreakMode, resetTracker, setAutoStarted } = trackerSlice.actions;
 export default trackerSlice.reducer;
