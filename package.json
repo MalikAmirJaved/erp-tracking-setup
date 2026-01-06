@@ -55,10 +55,17 @@
         "nsis"
       ]
     },
+    "protocols": [
+      {
+        "name": "ERP Monitoring",
+        "schemes": ["erpmonitoring"]
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh" 
     },
     "asar": true,
     "forceCodeSigning": false
