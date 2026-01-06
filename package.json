@@ -1,16 +1,16 @@
 {
-  "name": "tracker-exe-test",
+  "name": "erp-monitoring",
   "version": "0.0.1",
   "private": true,
   "main": "electron/main.js",
-  "productName": "Tracker Test",
+  "productName": "ERP Monitoring",
   "scripts": {
     "dev": "vite",
     "electron": "electron .",
     "build": "vite build",
     "dist": "electron-builder --win --x64 --publish never",
-    "start": "cd electron/go && go build -o tracker.exe ./cmd/tracker && cd ../../ && concurrently \"npm run dev\" \"npm run electron\"",
-    "exe": "cd electron/go && go build -o tracker.exe ./cmd/tracker && cd ../../ && npm run build && npm run dist"
+    "start": "cd electron/go && go build -o erp-monitoring.exe ./cmd/tracker && cd ../../ && concurrently \"npm run dev\" \"npm run electron\"",
+    "exe": "cd electron/go && go build -o erp-monitoring.exe ./cmd/tracker && cd ../../ && npm run build && npm run dist"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^2.11.2",
@@ -34,8 +34,8 @@
     "vite": "^7.2.4"
   },
   "build": {
-    "appId": "com.test.tracker",
-    "productName": "Tracker Test",
+    "appId": "com.erp.monitoring",
+    "productName": "ERP Monitoring",
     "directories": {
       "output": "release"
     },
@@ -46,8 +46,8 @@
     ],
     "extraResources": [
       {
-        "from": "electron/go/tracker.exe",
-        "to": "go/tracker.exe"
+        "from": "electron/go/erp-monitoring.exe",
+        "to": "go/erp-monitoring.exe"
       }
     ],
     "win": {

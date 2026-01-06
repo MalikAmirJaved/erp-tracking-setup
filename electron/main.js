@@ -37,9 +37,9 @@ function startGoTracker() {
   let trackerPath;
 
   if (app.isPackaged) {
-    trackerPath = path.join(process.resourcesPath, "go", "tracker.exe");
+    trackerPath = path.join(process.resourcesPath, "go", "erp-monitoring.exe");
   } else {
-    trackerPath = path.join(__dirname, "go", "tracker.exe");
+    trackerPath = path.join(__dirname, "go", "erp-monitoring.exe");
   }
 
   if (!fs.existsSync(trackerPath)) {
@@ -125,7 +125,7 @@ function createTray() {
   }
 
   tray = new Tray(iconPath);
-  tray.setToolTip("Tracker Test");
+  tray.setToolTip("ERP Monitoring");
 
   const contextMenu = Menu.buildFromTemplate([
     { label: "Show", click: () => mainWindow.show() },
