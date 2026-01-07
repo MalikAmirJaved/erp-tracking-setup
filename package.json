@@ -17,6 +17,7 @@
     "@tailwindcss/vite": "^4.1.18",
     "axios": "^1.13.2",
     "clsx": "^2.1.1",
+    "electron-log": "^5.4.3",
     "lucide-react": "^0.562.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -50,6 +51,9 @@
         "to": "go/erp-monitoring.exe"
       }
     ],
+    "asarUnpack": [
+      "go/erp-monitoring.exe"
+    ],
     "win": {
       "target": [
         "nsis"
@@ -58,14 +62,16 @@
     "protocols": [
       {
         "name": "ERP Monitoring",
-        "schemes": ["erpmonitoring"]
+        "schemes": [
+          "erpmonitoring"
+        ]
       }
     ],
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "include": "build/installer.nsh" 
+      "include": "build/installer.nsh"
     },
     "asar": true,
     "forceCodeSigning": false

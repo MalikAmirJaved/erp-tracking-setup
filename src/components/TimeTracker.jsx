@@ -10,6 +10,7 @@ import {
   checkTrackingStatus,
 } from "@/feature/tracker/trackerSlice";
 import { useEffect, useState, useCallback } from "react";
+import { setUserFromDeepLink } from "@/feature/auth/authSlice";
 
 const TimeTracker = () => {
   const dispatch = useDispatch();
@@ -19,7 +20,15 @@ const TimeTracker = () => {
   const { user } = useSelector((state) => state.auth);
 
   const [, setTick] = useState(0);
-  
+  // Listen for deep link auth
+useEffect(() => {
+  if (window.electronAPI?.onDeepLinkAuth) {
+    window.electronAPI.onDeepLinkAuth((userInfo) => {
+      console.log("Deep link auth received in renderer:", userInfo);
+      dispatch(setUserFromDeepLink(userInfo));
+    });
+  }
+}, [dispatch]);
   // Check tracking status on mount (for auto-start)
   useEffect(() => {
     // Check if Go tracker is already running

@@ -1,156 +1,135 @@
 // electron/main.js
-const { app, BrowserWindow, Tray, Menu, ipcMain, screen, dialog } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const fs = require("fs");
 
+app.commandLine.appendSwitch("ignore-certificate-errors"); // ignore SSL errors
+app.commandLine.appendSwitch("allow-insecure-localhost"); // allow localhost HTTP
+app.setAsDefaultProtocolClient("erpmonitoring", process.execPath, [
+  "--",
+  "--allow-insecure-localhost"
+]);
+
 let mainWindow;
 let tray;
 let trackerProcess = null;
+let currentUser = null;
 
-// ---------- Deep Link / Custom Protocol Handling ----------
-function handleDeepLink(url) {
-  console.log("Received deep link:", url);
-
-  // Example: parse the URL and send to renderer if needed
-  try {
-    const parsed = new URL(url);
-    console.log("Protocol path:", parsed.pathname);
-    console.log("Search params:", parsed.searchParams.toString());
-
-    // You can forward the URL or parsed data to the renderer process
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send("deep-link", {
-        url,
-        path: parsed.pathname,
-        params: Object.fromEntries(parsed.searchParams),
-      });
-    }
-  } catch (err) {
-    console.error("Invalid deep link URL:", err);
-  }
-
-  // Ensure window is visible
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-  }
-}
-
-// When a second instance is launched with a protocol URL
-app.on("second-instance", (event, commandLine, workingDirectory) => {
-  const url = commandLine.find((arg) => arg.startsWith("erpmonitoring://"));
-  if (url) {
-    handleDeepLink(url);
-  }
-
-  // Focus existing window
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-  }
-});
-
-// ---------- Auto-start screenshot tracking ----------
-async function autoStartTracking() {
-  let attempts = 0;
-  const maxAttempts = 15;
-
-  while (attempts < maxAttempts) {
-    try {
-      const res = await fetch("http://localhost:9090/start", { method: "POST" });
-      if (res.ok && (await res.text()) === "success") {
-        console.log("✅ Screenshot capture auto-started");
-
-        // Notify renderer
-        mainWindow?.webContents.send("auto-tracking-started");
-        return;
-      }
-    } catch (err) {
-      console.log("Go tracker not ready, retrying in 1s...");
-    }
-    attempts++;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  console.error("Failed to auto-start tracking");
-}
-
-// ---------- Start Go tracker binary ----------
-function startGoTracker() {
-  let trackerPath;
-
-  if (app.isPackaged) {
-    trackerPath = path.join(process.resourcesPath, "go", "erp-monitoring.exe");
-  } else {
-    trackerPath = path.join(__dirname, "go", "erp-monitoring.exe");
-  }
-
-  if (!fs.existsSync(trackerPath)) {
-    console.error(`Go tracker binary not found at: ${trackerPath}`);
-
-    if (app.isPackaged) {
-      dialog.showErrorBox(
-        "Tracker Binary Missing",
-        "The screenshot capture module could not be found. Please reinstall the application."
-      );
-    }
+// ---------- Reliable send user + auto-start ----------
+function sendUserToGoAndAutoStart() {
+  if (!currentUser) {
     return;
   }
 
-  console.log(`Starting Go tracker: ${trackerPath}`);
+  const trySend = () => {
+
+    fetch("http://127.0.0.1:9090/set-user", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(currentUser),
+      mode: "cors"
+
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        // Now start tracking
+        return fetch("http://127.0.0.1:9090/start", { method: "POST" });
+      })
+      .then((startRes) => {
+        if (!startRes.ok) throw new Error(`Start HTTP ${startRes.status}`);
+        return startRes.text();
+      })
+      .then((text) => {
+        if (text.trim() === "success") {
+          if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send("auto-tracking-started");
+          }
+        } else {
+          throw new Error(`Unexpected response: ${text}`);
+        }
+      })
+      .catch((err) => {
+        log.warn("Go tracker not ready or error – retrying in 1s:", err.message || err);
+        setTimeout(trySend, 1000);
+      });
+  };
+
+  trySend();
+}
+
+function handleDeepLink(url) {
 
   try {
-    trackerProcess = spawn(trackerPath, [], {
-      detached: false,
-      stdio: "ignore",
-      windowsHide: true,
-    });
+    // Strip the protocol and parse manually
+    const urlWithoutProtocol = url.replace(/^erpmonitoring:\/\//, "");
+    // Split path and query
+    const [path, queryString] = urlWithoutProtocol.split("?");
+    
+    // Use URLSearchParams on the query string
+    const params = new URLSearchParams(queryString);
+    
+    const userIdRaw = params.get("userId");
+    const companyIdRaw = params.get("companyId");
+    const name = params.get("name");
 
-    trackerProcess.on("error", (err) => {
-      console.error("Failed to start tracker process:", err);
-    });
+    if (userIdRaw && companyIdRaw && name) {
+      const userInfo = {
+        userId: userIdRaw,
+        companyId: companyIdRaw,
+        name: decodeURIComponent(name),
+      };
 
-    trackerProcess.on("exit", (code) => {
-      console.log(`Tracker process exited with code ${code}`);
-      trackerProcess = null;
-    });
+      currentUser = userInfo;
 
-    trackerProcess.unref();
-  } catch (error) {
-    console.error("Error starting tracker:", error);
+      if (mainWindow && mainWindow.webContents) {
+        mainWindow.webContents.send("deep-link-auth", userInfo);
+      }
+
+      sendUserToGoAndAutoStart();
+    }
+  } catch (e) {
+    log.error("Invalid deep link:", e);
   }
 }
 
-// ---------- Create main window ----------
+
+
+// ---------- Go Tracker ----------
+function startGoTracker() {
+  const goExePath = app.isPackaged
+    ? path.join(process.resourcesPath, "go", "erp-monitoring.exe")
+    : path.join(__dirname, "go", "erp-monitoring.exe");
+
+  if (!fs.existsSync(goExePath)) {
+    log.error("Go executable not found at:", goExePath);
+    return;
+  }
+
+  trackerProcess = spawn(goExePath, [], { windowsHide: true });
+}
+
+// ---------- Window ----------
 function createWindow() {
-  const { width: screenWidth, height: screenHeight } =
-    screen.getPrimaryDisplay().workAreaSize;
-
-  const winWidth = Math.round(screenWidth * 0.2); // 20%
-  const winHeight = Math.round(screenHeight * 0.15); // 15%
-
   mainWindow = new BrowserWindow({
-    width: winWidth,
-    height: winHeight,
-    x: screenWidth - winWidth - 30,
-    y: screenHeight - winHeight - 80,
-    frame: false,
+    width: 420,
+    height: 700,
     resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    transparent: false,
-    backgroundColor: "#FFFFFF",
+    frame: false,
+    transparent: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      devTools: true,
     },
   });
 
   if (app.isPackaged) {
     mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
   } else {
-    mainWindow.loadURL("http://localhost:4000");
+    mainWindow.loadURL("http://127.0.0.1:4000");
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
@@ -159,14 +138,10 @@ function createWindow() {
   });
 }
 
-// ---------- Create system tray ----------
+// ---------- Tray ----------
 function createTray() {
-  const iconPath = path.join(__dirname, "icon.png"); // orange tray icon
-
-  if (!fs.existsSync(iconPath)) {
-    console.error("Tray icon not found:", iconPath);
-    return;
-  }
+  const iconPath = path.join(__dirname, "icon.png");
+  if (!fs.existsSync(iconPath)) return;
 
   tray = new Tray(iconPath);
   tray.setToolTip("ERP Monitoring");
@@ -186,33 +161,39 @@ function createTray() {
 ipcMain.on("hide-window", () => {
   mainWindow?.hide();
 });
-const gotTheLock = app.requestSingleInstanceLock();
 
+// Single instance + protocol
+const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
   app.on("second-instance", (event, commandLine) => {
-    const url = commandLine.find(arg => arg.startsWith("erpmonitoring://"));
+    const url = commandLine.find((arg) => arg.startsWith("erpmonitoring://"));
     if (url) handleDeepLink(url);
+
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+    }
   });
 }
 
 app.setAsDefaultProtocolClient("erpmonitoring");
-// ---------- App ready ----------
+
+// ---------- App Ready ----------
 app.whenReady().then(() => {
   startGoTracker();
   createWindow();
   createTray();
 
-  // Check if app was opened with a protocol URL on first launch
-  const startupUrl = process.argv.find((arg) =>
-    arg.startsWith("erpmonitoring://")
-  );
-  if (startupUrl) {
-    handleDeepLink(startupUrl);
-  }
+  // Handle startup deep link
+  const startupUrl = process.argv.find((arg) => arg.startsWith("erpmonitoring://"));
+  if (startupUrl) handleDeepLink(startupUrl);
 
-  setTimeout(autoStartTracking, 1500); // Auto-start screenshots
+  // Fallback: if somehow user is already set (rare), try once
+  setTimeout(() => {
+    if (currentUser) sendUserToGoAndAutoStart();
+  }, 3000);
 });
 
 app.on("activate", () => {
@@ -220,9 +201,7 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
-  if (trackerProcess) {
-    trackerProcess.kill();
-  }
+  if (trackerProcess) trackerProcess.kill();
 });
 
 app.on("window-all-closed", () => {

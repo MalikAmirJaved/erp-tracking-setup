@@ -1,36 +1,99 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"image/png"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
-	"tracker/internal/screenshot"
+	"github.com/kbinani/screenshot"
+	"github.com/shirou/gopsutil/v3/host"
 )
 
+type UserInfo struct {
+	UserID    string `json:"userId"`
+	CompanyID string `json:"companyId"`
+	Name      string `json:"name"`
+}
+
 var (
-	mu        sync.Mutex
-	isRunning bool
-	ticker    *time.Ticker
-	stopChan  chan struct{}
+	mu          sync.Mutex
+	isRunning   bool
+	ticker      *time.Ticker
+	stopChan    chan struct{}
+	currentUser *UserInfo
+	userIP      string
 )
+
+func getLocalIP() string {
+	info, _ := host.Info()
+	return info.Hostname // fallback
+}
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow your dev origin + any (for packaged app, origin is null or file://)
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-		// Handle preflight OPTIONS request
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
+}
+
+func CaptureScreen() error {
+	mu.Lock()
+	user := currentUser
+	mu.Unlock()
+
+	if user == nil {
+		return fmt.Errorf("no authenticated user")
+	}
+
+	n := screenshot.NumActiveDisplays()
+	if n == 0 {
+		return fmt.Errorf("no display found")
+	}
+
+	dir := "D:\\trackingScreenShot"
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		return err
+	}
+
+	ip := userIP
+	if ip == "" {
+		ip = getLocalIP()
+	}
+
+	for i := 0; i < n; i++ {
+		bounds := screenshot.GetDisplayBounds(i)
+		img, err := screenshot.CaptureRect(bounds)
+		if err != nil {
+			return err
+		}
+
+		fileName := fmt.Sprintf("screenshot_%d_%d.png", i, time.Now().Unix())
+		filePath := filepath.Join(dir, fileName)
+
+		file, err := os.Create(filePath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		if err := png.Encode(file, img); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func startCaptureLoop() {
@@ -40,28 +103,18 @@ func startCaptureLoop() {
 		return
 	}
 	isRunning = true
+	stopChan = make(chan struct{})
 	mu.Unlock()
 
-	stopChan = make(chan struct{})
-	ticker = time.NewTicker(1 * time.Minute)
-
+	ticker = time.NewTicker(10 * time.Second) // adjust interval as needed
 	go func() {
-		// Immediate first screenshot
-		if err := screenshot.CaptureScreen(); err != nil {
-			log.Printf("Initial screenshot failed: %v", err)
-		}
-
 		for {
 			select {
 			case <-ticker.C:
-				if err := screenshot.CaptureScreen(); err != nil {
-					log.Printf("Periodic screenshot failed: %v", err)
+				if err := CaptureScreen(); err != nil {
+					log.Printf("Capture error: %v", err)
 				}
 			case <-stopChan:
-				ticker.Stop()
-				mu.Lock()
-				isRunning = false
-				mu.Unlock()
 				return
 			}
 		}
@@ -70,53 +123,85 @@ func startCaptureLoop() {
 
 func stopCaptureLoop() {
 	mu.Lock()
-	defer mu.Unlock()
 	if !isRunning {
+		mu.Unlock()
 		return
+	}
+	isRunning = false
+	if ticker != nil {
+		ticker.Stop()
 	}
 	if stopChan != nil {
 		close(stopChan)
 	}
-	isRunning = false
+	mu.Unlock()
 }
 
 func main() {
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/set-user", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Received /set-user request")
+
+		var user UserInfo
+		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+			http.Error(w, "Invalid user data", http.StatusBadRequest)
+			return
+		}
+
+		mu.Lock()
+		currentUser = &user
+		mu.Unlock()
+
+		log.Printf("User authenticated: %s (ID: %s, Company: %s)", user.Name, user.UserID, user.CompanyID)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("user set"))
+	})
+
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
-		err := screenshot.CaptureScreen()
-		if err != nil {
-			http.Error(w, "Failed to take initial screenshot", http.StatusInternalServerError)
+		log.Println("Received /start request")
+
+		mu.Lock()
+		user := currentUser
+		mu.Unlock()
+
+		if user == nil {
+			http.Error(w, "No user authenticated", http.StatusForbidden)
+			return
+		}
+
+		if err := CaptureScreen(); err != nil {
+			http.Error(w, "Initial capture failed", http.StatusInternalServerError)
 			return
 		}
 
 		startCaptureLoop()
-
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("success"))
 	})
 
 	mux.HandleFunc("/stop", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Received /stop request")
 		stopCaptureLoop()
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("stopped"))
 	})
+
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Received /status request")
 		mu.Lock()
 		running := isRunning
 		mu.Unlock()
 
 		if running {
-			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("running"))
 		} else {
-			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("stopped"))
 		}
 	})
-	// Wrap with CORS middleware
-	handler := corsMiddleware(mux)
 
+	handler := corsMiddleware(mux)
+	
 	log.Println("Go tracker running on :9090")
-	log.Fatal(http.ListenAndServe(":9090", handler))
+	log.Fatal(http.ListenAndServe("127.0.0.1:9090", handler))
 }
