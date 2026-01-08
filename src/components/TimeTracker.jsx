@@ -13,15 +13,24 @@ const TimeTracker = () => {
   const { status, time, startTime, loading, isAutoStarted } = useSelector(
     (state) => state.tracker
   );
-
+  
   const [tick, setTick] = useState(0);
-  const [currentUser, setCurrentUser] = useState(null);
+  const [currentUser, setCurrentUser] = useState("");
+  
   useEffect(() => {
-    // Fetch persisted user from main process
-    window.electronAPI.getUser().then((storedUser) => {
-      setCurrentUser(storedUser);
-    });
+    if (status !== "active" && status !== "break") return;
+    const interval = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [status]);
+console.log("thje window.electronAPI?.onDeepLinkAuth: ", window.electronAPI?.onDeepLinkAuth)
+  useEffect(() => {
+    if (window.electronAPI?.onDeepLinkAuth) {
+      window.electronAPI.onDeepLinkAuth((userInfo) => {
+        console.log("Deep link auth received:", userInfo);
+      });
+    }
   }, []);
+  
   useEffect(() => {
     const checkStatus = async () => {
       try {
@@ -34,14 +43,13 @@ const TimeTracker = () => {
     };
     checkStatus();
   }, [dispatch]);
-
-  useEffect(() => {
-    if (window.electronAPI?.onDeepLinkAuth) {
-      window.electronAPI.onDeepLinkAuth((userInfo) => {
-        setCurrentUser(userInfo);
-      });
-    }
+useEffect(() => {
+    // Fetch persisted user from main process
+    window.electronAPI.getUser().then((storedUser) => {
+      setCurrentUser(storedUser);
+    });
   }, []);
+
 
   const formatTime = (seconds) => {
     const h = Math.floor(seconds / 3600);
@@ -76,7 +84,7 @@ const TimeTracker = () => {
     }
   };
 
-  const displayTime = (() => {
+    const displayTime = (() => {
     if (status !== "active" || !startTime) return formatTime(time);
     const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
     return formatTime(time + elapsed);
@@ -87,7 +95,7 @@ const TimeTracker = () => {
       <div
         style={{ WebkitAppRegion: "drag" }}
         className="bg-orange-600 flex items-center justify-end px-4 py-1 shrink-0 -webkit-app-region-drag text-white"
-      >
+        >
         <button
           onClick={handleMinimize}
           className="rounded-full hover:bg-orange-700 transition-colors -webkit-app-region-no-drag"
@@ -96,15 +104,14 @@ const TimeTracker = () => {
           <Minus className="w-5 h-5" />
         </button>
       </div>
+          {console.log("Tracker status:", currentUser)}
+
       {/* Main content */}
       <div className="flex flex-col justify-between h-full py-3">
         <div>
           <h1 className="font-semibold text-foreground w-full truncate ml-4">
             Good morning,{" "}
-            <span className="text-blue-700">
-              {currentUser?.name || "Unknown"}{" "}
-            </span>
-            👋
+            <span className="text-blue-700">{currentUser?.name || "Unknown"} </span>👋
           </h1>
           <div className="">
             <div className=" flex items-center gap-4 justify-between mx-5 text-xl">
