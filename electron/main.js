@@ -1,5 +1,5 @@
 // electron/main.js
-const { app, BrowserWindow, Tray, Menu, ipcMain } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, screen } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -51,7 +51,6 @@ function sendUserToGoAndAutoStart() {
         }
       })
       .catch((err) => {
-        log.warn("Go tracker not ready or error – retrying in 1s:", err.message || err);
         setTimeout(trySend, 1000);
       });
   };
@@ -90,7 +89,6 @@ function handleDeepLink(url) {
       sendUserToGoAndAutoStart();
     }
   } catch (e) {
-    log.error("Invalid deep link:", e);
   }
 }
 
@@ -103,7 +101,6 @@ function startGoTracker() {
     : path.join(__dirname, "go", "erp-monitoring.exe");
 
   if (!fs.existsSync(goExePath)) {
-    log.error("Go executable not found at:", goExePath);
     return;
   }
 
@@ -112,17 +109,27 @@ function startGoTracker() {
 
 // ---------- Window ----------
 function createWindow() {
+  const { width: screenWidth, height: screenHeight } =
+    screen.getPrimaryDisplay().workAreaSize;
+
+  const winWidth = Math.round(screenWidth * 0.2); // 20%
+  const winHeight = Math.round(screenHeight * 0.15); // 15%
+
   mainWindow = new BrowserWindow({
-    width: 420,
-    height: 700,
-    resizable: false,
+    width: winWidth,
+    height: winHeight,
+    x: screenWidth - winWidth - 30,
+    y: screenHeight - winHeight - 80,
     frame: false,
-    transparent: true,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    transparent: false,
+    backgroundColor: "#FFFFFF",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      devTools: true,
     },
   });
 
