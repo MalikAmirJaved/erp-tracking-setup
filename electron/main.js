@@ -1,57 +1,67 @@
 // electron/main.js
-const { app, BrowserWindow, Tray, Menu, ipcMain, screen } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain,screen } = require("electron");
 const path = require("path");
-const { spawn } = require("child_process");
 const fs = require("fs");
+const Store = require("electron-store");
 
-app.commandLine.appendSwitch("ignore-certificate-errors"); // ignore SSL errors
-app.commandLine.appendSwitch("allow-insecure-localhost"); // allow localhost HTTP
-app.setAsDefaultProtocolClient("erpmonitoring", process.execPath, [
-  "--",
-  "--allow-insecure-localhost"
-]);
-
+const store = new Store();
 let mainWindow;
 let tray;
 let trackerProcess = null;
-let currentUser = null;
+let currentUser = store.get("user") || null; // Persistent user
 
-// ---------- Reliable send user + auto-start ----------
-function sendUserToGoAndAutoStart() {
-  if (!currentUser) {
+app.commandLine.appendSwitch("ignore-certificate-errors");
+app.commandLine.appendSwitch("allow-insecure-localhost");
+app.setAsDefaultProtocolClient("erpmonitoring");
+
+function startGoTracker() {
+  if (trackerProcess || !currentUser) return;
+  let goExePath ;
+  if (app.isPackaged) {
+      goExePath = path.join(process.resourcesPath, "go", "erp-monitoring.exe");
+    } else {
+      goExePath = path.join(__dirname, "go", "erp-monitoring.exe");
+    }
+  if (!fs.existsSync(goExePath)) {
+    console.error("Go tracker executable not found:", goExePath);
     return;
   }
 
-  const trySend = () => {
+  trackerProcess = require("child_process").spawn(goExePath, [], {
+    windowsHide: true,
+  });
 
+  trackerProcess.on("error", (err) => {
+    console.error("Failed to start Go tracker:", err);
+    trackerProcess = null;
+  });
+
+  trackerProcess.on("close", (code) => {
+    console.log("Go tracker exited with code:", code);
+    trackerProcess = null;
+  });
+}
+
+function sendUserToGoAndAutoStart() {
+  if (!currentUser) return;
+
+  const trySend = () => {
     fetch("http://127.0.0.1:9090/set-user", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(currentUser),
-      mode: "cors"
-
     })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        // Now start tracking
         return fetch("http://127.0.0.1:9090/start", { method: "POST" });
       })
       .then((startRes) => {
-        if (!startRes.ok) throw new Error(`Start HTTP ${startRes.status}`);
-        return startRes.text();
-      })
-      .then((text) => {
-        if (text.trim() === "success") {
-          if (mainWindow && mainWindow.webContents) {
-            mainWindow.webContents.send("auto-tracking-started");
-          }
-        } else {
-          throw new Error(`Unexpected response: ${text}`);
-        }
+        if (!startRes.ok) throw new Error(`Start failed ${startRes.status}`);
+        mainWindow?.webContents.send("auto-tracking-started");
       })
       .catch((err) => {
-        setTimeout(trySend, 1000);
+        console.log("Retry sending user/start:", err.message);
+        setTimeout(trySend, 1500);
       });
   };
 
@@ -59,55 +69,29 @@ function sendUserToGoAndAutoStart() {
 }
 
 function handleDeepLink(url) {
+  if (!url?.startsWith("erpmonitoring://")) return;
 
-  try {
-    // Strip the protocol and parse manually
-    const urlWithoutProtocol = url.replace(/^erpmonitoring:\/\//, "");
-    // Split path and query
-    const [path, queryString] = urlWithoutProtocol.split("?");
-    
-    // Use URLSearchParams on the query string
-    const params = new URLSearchParams(queryString);
-    
-    const userIdRaw = params.get("userId");
-    const companyIdRaw = params.get("companyId");
-    const name = params.get("name");
+  const urlWithoutProtocol = url.replace(/^erpmonitoring:\/\//, "");
+  const [_, queryString] = urlWithoutProtocol.split("?");
+  const params = new URLSearchParams(queryString);
 
-    if (userIdRaw && companyIdRaw && name) {
-      const userInfo = {
-        userId: userIdRaw,
-        companyId: companyIdRaw,
-        name: decodeURIComponent(name),
-      };
+  const userInfo = {
+    userId: params.get("userId"),
+    companyId: params.get("companyId"),
+    name: params.get("name") || "User",
+  };
 
-      currentUser = userInfo;
+  if (userInfo.userId && userInfo.companyId) {
+    currentUser = userInfo;
+    store.set("user", currentUser); // Save persistently
 
-      if (mainWindow && mainWindow.webContents) {
-        mainWindow.webContents.send("deep-link-auth", userInfo);
-      }
+    mainWindow?.webContents.send("deep-link-auth", currentUser);
 
-      sendUserToGoAndAutoStart();
-    }
-  } catch (e) {
+    startGoTracker();
+    setTimeout(sendUserToGoAndAutoStart, 800);
   }
 }
 
-
-
-// ---------- Go Tracker ----------
-function startGoTracker() {
-  const goExePath = app.isPackaged
-    ? path.join(process.resourcesPath, "go", "erp-monitoring.exe")
-    : path.join(__dirname, "go", "erp-monitoring.exe");
-
-  if (!fs.existsSync(goExePath)) {
-    return;
-  }
-
-  trackerProcess = spawn(goExePath, [], { windowsHide: true });
-}
-
-// ---------- Window ----------
 function createWindow() {
   const { width: screenWidth, height: screenHeight } =
     screen.getPrimaryDisplay().workAreaSize;
@@ -136,16 +120,23 @@ function createWindow() {
   if (app.isPackaged) {
     mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
   } else {
-    mainWindow.loadURL("http://127.0.0.1:4000");
+    mainWindow.loadURL("http://localhost:4000");
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+
+  if (currentUser) {
+    setTimeout(() => {
+      mainWindow.webContents.send("deep-link-auth", currentUser);
+      startGoTracker();
+      sendUserToGoAndAutoStart();
+    }, 1000);
+  }
 }
 
-// ---------- Tray ----------
 function createTray() {
   const iconPath = path.join(__dirname, "icon.png");
   if (!fs.existsSync(iconPath)) return;
@@ -164,12 +155,8 @@ function createTray() {
   });
 }
 
-// ---------- IPC ----------
-ipcMain.on("hide-window", () => {
-  mainWindow?.hide();
-});
+ipcMain.on("hide-window", () => mainWindow?.hide());
 
-// Single instance + protocol
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
@@ -177,7 +164,6 @@ if (!gotTheLock) {
   app.on("second-instance", (event, commandLine) => {
     const url = commandLine.find((arg) => arg.startsWith("erpmonitoring://"));
     if (url) handleDeepLink(url);
-
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
@@ -185,22 +171,14 @@ if (!gotTheLock) {
   });
 }
 
-app.setAsDefaultProtocolClient("erpmonitoring");
-
-// ---------- App Ready ----------
 app.whenReady().then(() => {
-  startGoTracker();
   createWindow();
   createTray();
 
-  // Handle startup deep link
-  const startupUrl = process.argv.find((arg) => arg.startsWith("erpmonitoring://"));
+  const startupUrl = process.argv.find((arg) =>
+    arg.startsWith("erpmonitoring://")
+  );
   if (startupUrl) handleDeepLink(startupUrl);
-
-  // Fallback: if somehow user is already set (rare), try once
-  setTimeout(() => {
-    if (currentUser) sendUserToGoAndAutoStart();
-  }, 3000);
 });
 
 app.on("activate", () => {
@@ -209,8 +187,4 @@ app.on("activate", () => {
 
 app.on("before-quit", () => {
   if (trackerProcess) trackerProcess.kill();
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
 });

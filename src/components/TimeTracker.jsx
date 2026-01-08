@@ -1,16 +1,12 @@
-// src/components/TimeTracker.jsx - Update with proper break handling
-import { Play, Square, Coffee, ArrowDownToLine, Minus } from "lucide-react";
+import { Play, Square, Coffee, Minus } from "lucide-react";
 import { useSelector, useDispatch } from "react-redux";
 import {
   startTracking,
   stopTracking,
-  setBreakMode,
   toggleBreakTracking,
   setAutoStarted,
-  checkTrackingStatus,
 } from "@/feature/tracker/trackerSlice";
-import { useEffect, useState, useCallback } from "react";
-import { setUserFromDeepLink } from "@/feature/auth/authSlice";
+import { useEffect, useState } from "react";
 
 const TimeTracker = () => {
   const dispatch = useDispatch();
@@ -18,53 +14,46 @@ const TimeTracker = () => {
     (state) => state.tracker
   );
   const { user } = useSelector((state) => state.auth);
-
-  const [, setTick] = useState(0);
-  // Listen for deep link auth
-useEffect(() => {
-  if (window.electronAPI?.onDeepLinkAuth) {
-    window.electronAPI.onDeepLinkAuth((userInfo) => {
-      console.log("Deep link auth received in renderer:", userInfo);
-      dispatch(setUserFromDeepLink(userInfo));
-    });
-  }
-}, [dispatch]);
-  // Check tracking status on mount (for auto-start)
+  
+  const [tick, setTick] = useState(0);
+  const [currentUser, setCurrentUser] = useState("");
+  
+  console.log("Tracker status:", currentUser);
   useEffect(() => {
-    // Check if Go tracker is already running
+    if (status !== "active" && status !== "break") return;
+    const interval = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [status]);
+
+  useEffect(() => {
+    if (window.electronAPI?.onDeepLinkAuth) {
+      window.electronAPI.onDeepLinkAuth((userInfo) => {
+        console.log("Deep link auth received:", userInfo);
+        setCurrentUser(userInfo);
+      });
+    }
+  }, []);
+
+  useEffect(() => {
     const checkStatus = async () => {
       try {
-        const response = await fetch("http://localhost:9090/start", {
+        await fetch("http://localhost:9090/start", {
           method: "POST",
-          signal: AbortSignal.timeout(1000)
+          signal: AbortSignal.timeout(1000),
         });
-        if (response.ok) {
-          dispatch(setAutoStarted());
-        }
-      } catch (error) {
-        // Go tracker not ready yet, will be handled by auto-tracking-started event
-      }
+        dispatch(setAutoStarted());
+      } catch {}
     };
-    
     checkStatus();
   }, [dispatch]);
 
-  // Listen for auto-start event from main process
   useEffect(() => {
     if (window.electronAPI?.onAutoTrackingStarted) {
       window.electronAPI.onAutoTrackingStarted(() => {
-        console.log("Auto tracking started received from main process");
         dispatch(setAutoStarted());
       });
     }
   }, [dispatch]);
-
-  // Update timer every second when active
-  useEffect(() => {
-    if (status !== "active" || !startTime) return;
-    const interval = setInterval(() => setTick((v) => v + 1), 1000);
-    return () => clearInterval(interval);
-  }, [status, startTime]);
 
   const formatTime = (seconds) => {
     const h = Math.floor(seconds / 3600);
@@ -75,12 +64,19 @@ useEffect(() => {
       .padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
-  const displayTime = (() => {
-    if (status !== "active" || !startTime) return formatTime(time);
-    const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
-    return formatTime(time + elapsed);
-  })();
+  const handleBreakToggle = () => {
+    dispatch(toggleBreakTracking(status === "break"));
+  };
 
+  const handleEnd = () => {
+    dispatch(stopTracking());
+  };
+
+  const elapsed =
+    status === "active" || status === "break"
+      ? Math.floor((Date.now() - new Date(startTime)) / 1000)
+      : 0;
+  const handleMinimize = () => window.electronAPI?.hideWindow?.();
   const getStatusText = () => {
     switch (status) {
       case "active":
@@ -92,24 +88,11 @@ useEffect(() => {
     }
   };
 
-  const handleMinimize = () => window.electronAPI?.hideWindow?.();
-
-  // Handle break/resume
-  const handleBreakToggle = useCallback(() => {
-    if (status === "break") {
-      // Resume tracking - start Go tracker again
-      dispatch(toggleBreakTracking(false));
-    } else {
-      // Start break - stop Go tracker but keep timer running
-      dispatch(toggleBreakTracking(true));
-    }
-  }, [status, dispatch]);
-
-  // Handle end - stop both Go tracker and reset timer
-  const handleEnd = useCallback(() => {
-    dispatch(stopTracking());
-  }, [dispatch]);
-
+    const displayTime = (() => {
+    if (status !== "active" || !startTime) return formatTime(time);
+    const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
+    return formatTime(time + elapsed);
+  })();
   return (
     <div className="h-screen w-screen bg-white flex flex-col select-none overflow-hidden ">
       {/* Draggable orange title bar */}
