@@ -156,7 +156,9 @@ function createTray() {
 }
 
 ipcMain.on("hide-window", () => mainWindow?.hide());
-
+ipcMain.handle("get-user", () => {
+  return store.get("user") || null;
+});
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();

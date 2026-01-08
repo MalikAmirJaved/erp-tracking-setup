@@ -10,7 +10,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onAutoTrackingStarted: (callback) =>
     ipcRenderer.on("auto-tracking-started", () => callback()),
   onDeepLinkAuth: (callback) =>
-    ipcRenderer.on("deep-link-auth", (_event, userInfo) =>
-      callback(userInfo)
-    ),
+    ipcRenderer.on("deep-link-auth", (_event, userInfo) => callback(userInfo)),
+  getUser: () => ipcRenderer.invoke("get-user"),
 });

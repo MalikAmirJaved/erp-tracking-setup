@@ -13,27 +13,15 @@ const TimeTracker = () => {
   const { status, time, startTime, loading, isAutoStarted } = useSelector(
     (state) => state.tracker
   );
-  const { user } = useSelector((state) => state.auth);
-  
+
   const [tick, setTick] = useState(0);
-  const [currentUser, setCurrentUser] = useState("");
-  
-  console.log("Tracker status:", currentUser);
+  const [currentUser, setCurrentUser] = useState(null);
   useEffect(() => {
-    if (status !== "active" && status !== "break") return;
-    const interval = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(interval);
-  }, [status]);
-
-  useEffect(() => {
-    if (window.electronAPI?.onDeepLinkAuth) {
-      window.electronAPI.onDeepLinkAuth((userInfo) => {
-        console.log("Deep link auth received:", userInfo);
-        setCurrentUser(userInfo);
-      });
-    }
+    // Fetch persisted user from main process
+    window.electronAPI.getUser().then((storedUser) => {
+      setCurrentUser(storedUser);
+    });
   }, []);
-
   useEffect(() => {
     const checkStatus = async () => {
       try {
@@ -48,12 +36,12 @@ const TimeTracker = () => {
   }, [dispatch]);
 
   useEffect(() => {
-    if (window.electronAPI?.onAutoTrackingStarted) {
-      window.electronAPI.onAutoTrackingStarted(() => {
-        dispatch(setAutoStarted());
+    if (window.electronAPI?.onDeepLinkAuth) {
+      window.electronAPI.onDeepLinkAuth((userInfo) => {
+        setCurrentUser(userInfo);
       });
     }
-  }, [dispatch]);
+  }, []);
 
   const formatTime = (seconds) => {
     const h = Math.floor(seconds / 3600);
@@ -88,7 +76,7 @@ const TimeTracker = () => {
     }
   };
 
-    const displayTime = (() => {
+  const displayTime = (() => {
     if (status !== "active" || !startTime) return formatTime(time);
     const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
     return formatTime(time + elapsed);
@@ -108,13 +96,15 @@ const TimeTracker = () => {
           <Minus className="w-5 h-5" />
         </button>
       </div>
-
       {/* Main content */}
       <div className="flex flex-col justify-between h-full py-3">
         <div>
           <h1 className="font-semibold text-foreground w-full truncate ml-4">
             Good morning,{" "}
-            <span className="text-blue-700">{user?.name || "Unknown"} </span>👋
+            <span className="text-blue-700">
+              {currentUser?.name || "Unknown"}{" "}
+            </span>
+            👋
           </h1>
           <div className="">
             <div className=" flex items-center gap-4 justify-between mx-5 text-xl">
