@@ -45,6 +45,9 @@ function startGoTracker() {
 function sendUserToGoAndAutoStart() {
   if (!currentUser) return;
 
+  let attempts = 0;
+  const SILENT_RETRIES = 5;
+
   const trySend = () => {
     fetch("http://127.0.0.1:9090/set-user", {
       method: "POST",
@@ -53,20 +56,25 @@ function sendUserToGoAndAutoStart() {
     })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        // return fetch("http://127.0.0.1:9090/start", { method: "POST" });
-      })
-      .then((startRes) => {
-        if (!startRes.ok) throw new Error(`Start failed ${startRes.status}`);
-        mainWindow?.webContents.send("auto-tracking-started");
+        mainWindow?.webContents.send("user-sent-to-go");
       })
       .catch((err) => {
-        console.log("Retry sending user/start:", err.message);
+        attempts++;
+
+        // ⏳ Go not ready yet — expected on startup
+        if (err.message === "fetch failed" && attempts <= SILENT_RETRIES) {
+          setTimeout(trySend, 800);
+          return;
+        }
+
+        // ⚠️ Real error (after retries)
         setTimeout(trySend, 1500);
       });
   };
 
   trySend();
 }
+
 
 function handleDeepLink(url) {
   if (!url?.startsWith("erpmonitoring://")) return;
