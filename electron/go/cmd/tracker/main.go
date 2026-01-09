@@ -16,16 +16,25 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
-
 type UserInfo struct {
 	UserID    string `json:"userId"`
 	CompanyID string `json:"companyId"`
 	Name      string `json:"name"`
 }
 
+type CaptureType string
+
+const (
+	CaptureStart   CaptureType = "start"
+	CaptureRegular CaptureType = "regular"
+	CaptureBreak   CaptureType = "break"
+	CaptureResume  CaptureType = "resume"
+)
+
 var (
 	mu          sync.Mutex
 	isRunning   bool
+	isOnBreak   bool // true when user is on break
 	ticker      *time.Ticker
 	stopChan    chan struct{}
 	currentUser *UserInfo
@@ -56,13 +65,19 @@ func getMACAddress() string {
 	return "unknown-mac"
 }
 
-func CaptureScreen() error {
+func CaptureScreen(captureType CaptureType) error {
 	mu.Lock()
 	user := currentUser
+	onBreak := isOnBreak
 	mu.Unlock()
 
 	if user == nil {
 		return fmt.Errorf("no user authenticated")
+	}
+
+	// Skip regular captures during break
+	if onBreak && captureType == CaptureRegular {
+		return nil
 	}
 
 	n := screenshot.NumActiveDisplays()
@@ -75,6 +90,11 @@ func CaptureScreen() error {
 
 	timestamp := time.Now().Unix()
 
+	action := string(captureType)
+	if captureType == CaptureRegular {
+		action = "regular"
+	}
+
 	for i := 0; i < n; i++ {
 		bounds := screenshot.GetDisplayBounds(i)
 		img, err := screenshot.CaptureRect(bounds)
@@ -82,8 +102,8 @@ func CaptureScreen() error {
 			continue
 		}
 
-		filename := fmt.Sprintf("%s__%s__%s__%s__%d__%d.png",
-			user.CompanyID, user.UserID, localIP, macAddress, timestamp, i)
+		filename := fmt.Sprintf("%s__%s__%s__%s__%d__%s.png",
+			user.CompanyID, user.UserID, localIP, macAddress, timestamp, action)
 
 		filePath := filepath.Join(dir, filename)
 		f, err := os.Create(filePath)
@@ -103,15 +123,24 @@ func startCaptureLoop() {
 		return
 	}
 	isRunning = true
-	ticker = time.NewTicker(30 * time.Second) // adjust interval as needed
+	isOnBreak = false
+	ticker = time.NewTicker(30 * time.Second)
 	stopChan = make(chan struct{})
 	mu.Unlock()
+
+	// Immediate capture on fresh start
+	CaptureScreen(CaptureStart)
 
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				CaptureScreen()
+				mu.Lock()
+				onBreak := isOnBreak
+				mu.Unlock()
+				if !onBreak {
+					CaptureScreen(CaptureRegular)
+				}
 			case <-stopChan:
 				return
 			}
@@ -126,6 +155,7 @@ func stopCaptureLoop() {
 		return
 	}
 	isRunning = false
+	isOnBreak = false
 	if ticker != nil {
 		ticker.Stop()
 	}
@@ -179,7 +209,11 @@ func main() {
 			return
 		}
 
-		if err := CaptureScreen(); err != nil {
+		mu.Lock()
+		isOnBreak = false
+		mu.Unlock()
+
+		if err := CaptureScreen(CaptureStart); err != nil {
 			http.Error(w, "capture failed", http.StatusInternalServerError)
 			return
 		}
@@ -193,11 +227,38 @@ func main() {
 		w.Write([]byte("stopped"))
 	})
 
+	// Dedicated break endpoint
+	mux.HandleFunc("/break", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		isOnBreak = true
+		mu.Unlock()
+
+		CaptureScreen(CaptureBreak)
+		w.Write([]byte("on break"))
+	})
+
+	// Dedicated resume endpoint
+	mux.HandleFunc("/resume", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		isOnBreak = false
+		mu.Unlock()
+
+		CaptureScreen(CaptureResume)
+
+		// Ensure loop is running
+		if !isRunning {
+			startCaptureLoop()
+		}
+		w.Write([]byte("resumed"))
+	})
+
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		running := isRunning
+		onBreak := isOnBreak
 		mu.Unlock()
-		if running {
+
+		if running && !onBreak {
 			w.Write([]byte("running"))
 		} else {
 			w.Write([]byte("stopped"))

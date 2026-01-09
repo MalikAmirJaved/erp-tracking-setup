@@ -63,24 +63,31 @@ export const checkTrackingStatus = createAsyncThunk(
 // Add a break tracking thunk to stop/start the Go tracker
 export const toggleBreakTracking = createAsyncThunk(
   "tracker/toggleBreak",
-  async (isBreak, { rejectWithValue }) => {
+  async (isCurrentlyBreak, { rejectWithValue }) => {
     try {
-      if (isBreak) {
-        // Stop tracking during break
-        const res = await fetch(`${API_URL}/stop`, { method: "POST" });
-        if (!res.ok) throw new Error("Failed to stop");
-        return "break";
+      let endpoint;
+      let newStatus;
+
+      if (isCurrentlyBreak) {
+        // Currently on break → Resume
+        endpoint = "/resume";
+        newStatus = "active";
       } else {
-        // Resume tracking
-        const res = await fetch(`${API_URL}/start`, { method: "POST" });
-        if (!res.ok) throw new Error("Failed to start");
-        return "active";
+        // Currently active → Go on break
+        endpoint = "/break";
+        newStatus = "break";
       }
+
+      const res = await fetch(`${API_URL}${endpoint}`, { method: "POST" });
+      if (!res.ok) throw new Error("Failed");
+
+      return newStatus;
     } catch (error) {
       return rejectWithValue(error.message);
     }
   }
 );
+
 const trackerSlice = createSlice({
   name: "tracker",
   initialState: {
