@@ -1,5 +1,5 @@
 // electron/main.js
-const { app, BrowserWindow, Tray, Menu, ipcMain,screen } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, screen } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const Store = require("electron-store");
@@ -16,12 +16,12 @@ app.setAsDefaultProtocolClient("erpmonitoring");
 
 function startGoTracker() {
   if (trackerProcess || !currentUser) return;
-  let goExePath ;
+  let goExePath;
   if (app.isPackaged) {
-      goExePath = path.join(process.resourcesPath, "go", "erp-monitoring.exe");
-    } else {
-      goExePath = path.join(__dirname, "go", "erp-monitoring.exe");
-    }
+    goExePath = path.join(process.resourcesPath, "go", "erp-monitoring.exe");
+  } else {
+    goExePath = path.join(__dirname, "go", "erp-monitoring.exe");
+  }
   if (!fs.existsSync(goExePath)) {
     console.error("Go tracker executable not found:", goExePath);
     return;
@@ -42,7 +42,7 @@ function startGoTracker() {
   });
 }
 
-function sendUserToGoAndAutoStart() {
+async function sendUserToGoAndAutoStart() {
   if (!currentUser) return;
 
   let attempts = 0;
@@ -64,11 +64,11 @@ function sendUserToGoAndAutoStart() {
 
       if (!startRes.ok) throw new Error(`Start failed ${startRes.status}`);
 
+      // ONLY AFTER SUCCESS → notify renderer that tracking auto-started
       mainWindow?.webContents.send("auto-tracking-started");
     } catch (err) {
       attempts++;
 
-      // 🔇 Silent during startup warm-up
       if (attempts > MAX_SILENT_RETRIES) {
         console.warn("Go service not ready yet, retrying...");
       }
@@ -79,7 +79,6 @@ function sendUserToGoAndAutoStart() {
 
   trySend();
 }
-
 
 function handleDeepLink(url) {
   if (!url?.startsWith("erpmonitoring://")) return;
@@ -96,7 +95,13 @@ function handleDeepLink(url) {
 
   if (userInfo.userId && userInfo.companyId) {
     currentUser = userInfo;
-    store.set("user", currentUser); // Save persistently
+    store.set("user", currentUser);
+
+    // Kill old tracker process if running
+    if (trackerProcess) {
+      trackerProcess.kill();
+      trackerProcess = null;
+    }
 
     mainWindow?.webContents.send("deep-link-auth", currentUser);
 
@@ -109,8 +114,8 @@ function createWindow() {
   const { width: screenWidth, height: screenHeight } =
     screen.getPrimaryDisplay().workAreaSize;
 
-  const winWidth = Math.round(screenWidth * 0.2); // 20%
-  const winHeight = Math.round(screenHeight * 0.15); // 15%
+  const winWidth = Math.round(screenWidth * 0.2);
+  const winHeight = Math.round(screenHeight * 0.15);
 
   mainWindow = new BrowserWindow({
     width: winWidth,
@@ -172,6 +177,7 @@ ipcMain.on("hide-window", () => mainWindow?.hide());
 ipcMain.handle("get-user", () => {
   return store.get("user") || null;
 });
+
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();

@@ -18,61 +18,37 @@ const TimeTracker = () => {
   const [tick, setTick] = useState(0);
   const [currentUser, setCurrentUser] = useState(null);
 
+  // Live timer tick
   useEffect(() => {
     if (status !== "active" && status !== "break") return;
     const interval = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(interval);
   }, [status]);
 
-  // Load persisted user on first mount
+  // Load persisted user
   useEffect(() => {
     window.electronAPI.getUser().then((storedUser) => {
-      if (storedUser) {
-        setCurrentUser(storedUser);
-      }
+      if (storedUser) setCurrentUser(storedUser);
     });
   }, []);
 
-  // Listen for new deep-link authentication (new account login)
+  // Listen for deep link new login
   useEffect(() => {
     if (window.electronAPI?.onDeepLinkAuth) {
       window.electronAPI.onDeepLinkAuth((userInfo) => {
-        setCurrentUser(userInfo); // Update displayed name
-        dispatch(resetTracker()); // Reset timer and status for new account
+        setCurrentUser(userInfo);
+        dispatch(resetTracker()); // Reset everything for new user
       });
     }
   }, [dispatch]);
 
-  // In TimeTracker.jsx – replace the existing auto-start useEffect
+  // Listen for auto-start signal from main process
   useEffect(() => {
-    const checkAndAutoStart = async () => {
-      let attempts = 0;
-      const maxAttempts = 8; // ~6 seconds total
-
-      const tryCheck = async () => {
-        try {
-          const res = await fetch("http://localhost:9090/status", {
-            method: "GET",
-            signal: AbortSignal.timeout(1000),
-          });
-          if (res.ok && (await res.text()) === "running") {
-            dispatch(setAutoStarted());
-            return true;
-          }
-        } catch (err) {
-          // Go server not ready yet or not running
-        }
-
-        attempts++;
-        if (attempts < maxAttempts) {
-          setTimeout(tryCheck, 800);
-        }
-      };
-
-      await tryCheck();
-    };
-
-    checkAndAutoStart();
+    if (window.electronAPI?.onAutoTrackingStarted) {
+      window.electronAPI.onAutoTrackingStarted(() => {
+        dispatch(setAutoStarted());
+      });
+    }
   }, [dispatch]);
 
   const formatTime = (seconds) => {
