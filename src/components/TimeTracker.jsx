@@ -5,6 +5,7 @@ import {
   stopTracking,
   toggleBreakTracking,
   setAutoStarted,
+  resetTracker,
 } from "@/feature/tracker/trackerSlice";
 import { useEffect, useState } from "react";
 
@@ -15,7 +16,7 @@ const TimeTracker = () => {
   );
 
   const [tick, setTick] = useState(0);
-  const [currentUser, setCurrentUser] = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
 
   useEffect(() => {
     if (status !== "active" && status !== "break") return;
@@ -23,31 +24,56 @@ const TimeTracker = () => {
     return () => clearInterval(interval);
   }, [status]);
 
+  // Load persisted user on first mount
+  useEffect(() => {
+    window.electronAPI.getUser().then((storedUser) => {
+      if (storedUser) {
+        setCurrentUser(storedUser);
+      }
+    });
+  }, []);
+
+  // Listen for new deep-link authentication (new account login)
   useEffect(() => {
     if (window.electronAPI?.onDeepLinkAuth) {
       window.electronAPI.onDeepLinkAuth((userInfo) => {
+        setCurrentUser(userInfo); // Update displayed name
+        dispatch(resetTracker()); // Reset timer and status for new account
       });
     }
-  }, []);
-
-  useEffect(() => {
-    const checkStatus = async () => {
-      try {
-        await fetch("http://localhost:9090/start", {
-          method: "POST",
-          signal: AbortSignal.timeout(1000),
-        });
-        dispatch(setAutoStarted());
-      } catch {}
-    };
-    checkStatus();
   }, [dispatch]);
+
+  // In TimeTracker.jsx – replace the existing auto-start useEffect
   useEffect(() => {
-    // Fetch persisted user from main process
-    window.electronAPI.getUser().then((storedUser) => {
-      setCurrentUser(storedUser);
-    });
-  }, []);
+    const checkAndAutoStart = async () => {
+      let attempts = 0;
+      const maxAttempts = 8; // ~6 seconds total
+
+      const tryCheck = async () => {
+        try {
+          const res = await fetch("http://localhost:9090/status", {
+            method: "GET",
+            signal: AbortSignal.timeout(1000),
+          });
+          if (res.ok && (await res.text()) === "running") {
+            dispatch(setAutoStarted());
+            return true;
+          }
+        } catch (err) {
+          // Go server not ready yet or not running
+        }
+
+        attempts++;
+        if (attempts < maxAttempts) {
+          setTimeout(tryCheck, 800);
+        }
+      };
+
+      await tryCheck();
+    };
+
+    checkAndAutoStart();
+  }, [dispatch]);
 
   const formatTime = (seconds) => {
     const h = Math.floor(seconds / 3600);
@@ -66,11 +92,8 @@ const TimeTracker = () => {
     dispatch(stopTracking());
   };
 
-  const elapsed =
-    status === "active" || status === "break"
-      ? Math.floor((Date.now() - new Date(startTime)) / 1000)
-      : 0;
   const handleMinimize = () => window.electronAPI?.hideWindow?.();
+
   const getStatusText = () => {
     switch (status) {
       case "active":
@@ -87,6 +110,7 @@ const TimeTracker = () => {
     const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
     return formatTime(time + elapsed);
   })();
+
   return (
     <div className="h-screen w-screen bg-white flex flex-col select-none overflow-hidden ">
       {/* Draggable orange title bar */}

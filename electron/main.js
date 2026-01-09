@@ -46,30 +46,35 @@ function sendUserToGoAndAutoStart() {
   if (!currentUser) return;
 
   let attempts = 0;
-  const SILENT_RETRIES = 5;
+  const MAX_SILENT_RETRIES = 3;
 
-  const trySend = () => {
-    fetch("http://127.0.0.1:9090/set-user", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(currentUser),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        mainWindow?.webContents.send("user-sent-to-go");
-      })
-      .catch((err) => {
-        attempts++;
-
-        // ⏳ Go not ready yet — expected on startup
-        if (err.message === "fetch failed" && attempts <= SILENT_RETRIES) {
-          setTimeout(trySend, 800);
-          return;
-        }
-
-        // ⚠️ Real error (after retries)
-        setTimeout(trySend, 1500);
+  const trySend = async () => {
+    try {
+      const res = await fetch("http://127.0.0.1:9090/set-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(currentUser),
       });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const startRes = await fetch("http://127.0.0.1:9090/start", {
+        method: "POST",
+      });
+
+      if (!startRes.ok) throw new Error(`Start failed ${startRes.status}`);
+
+      mainWindow?.webContents.send("auto-tracking-started");
+    } catch (err) {
+      attempts++;
+
+      // 🔇 Silent during startup warm-up
+      if (attempts > MAX_SILENT_RETRIES) {
+        console.warn("Go service not ready yet, retrying...");
+      }
+
+      setTimeout(trySend, 1500);
+    }
   };
 
   trySend();

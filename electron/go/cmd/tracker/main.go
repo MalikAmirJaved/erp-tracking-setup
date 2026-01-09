@@ -29,6 +29,7 @@ const (
 	CaptureRegular CaptureType = "regular"
 	CaptureBreak   CaptureType = "break"
 	CaptureResume  CaptureType = "resume"
+	CaptureStop    CaptureType = "stop"
 )
 
 var (
@@ -223,9 +224,17 @@ func main() {
 	})
 
 	mux.HandleFunc("/stop", func(w http.ResponseWriter, r *http.Request) {
-		stopCaptureLoop()
-		w.Write([]byte("stopped"))
-	})
+    mu.Lock()
+    wasRunning := isRunning
+    mu.Unlock()
+
+    if wasRunning {
+        CaptureScreen(CaptureStop)  // ← Capture with "stop" action
+    }
+
+    stopCaptureLoop()
+    w.Write([]byte("stopped"))
+})
 
 	// Dedicated break endpoint
 	mux.HandleFunc("/break", func(w http.ResponseWriter, r *http.Request) {
