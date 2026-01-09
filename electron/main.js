@@ -134,7 +134,15 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-
+// ⬇️ ADD THIS BLOCK HERE
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (
+      ((input.control || input.meta) && input.key.toLowerCase() === "r") ||
+      input.key === "F5"
+    ) {
+      event.preventDefault();
+    }
+  });
   if (app.isPackaged) {
     mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
   } else {
