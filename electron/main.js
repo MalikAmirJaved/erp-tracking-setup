@@ -53,7 +53,7 @@ function sendUserToGoAndAutoStart() {
     })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return fetch("http://127.0.0.1:9090/start", { method: "POST" });
+        // return fetch("http://127.0.0.1:9090/start", { method: "POST" });
       })
       .then((startRes) => {
         if (!startRes.ok) throw new Error(`Start failed ${startRes.status}`);
