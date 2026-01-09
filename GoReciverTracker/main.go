@@ -15,7 +15,7 @@ const baseDir = `D:\UsersTrackingScreenShots`
 func main() {
     http.HandleFunc("/upload-screenshot", uploadScreenshotHandler)
 
-    port := ":4000"
+    port := ":3002"
     fmt.Printf("🚀 Screenshot server running on http://localhost%s\n", port)
     log.Fatal(http.ListenAndServe(port, nil))
 }

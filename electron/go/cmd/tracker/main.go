@@ -1,20 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image/png"
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"mime/multipart"
 
 	"github.com/kbinani/screenshot"
 )
+
+const SERVER_URL = "http://localhost:3002/upload-screenshot"
 
 type UserInfo struct {
 	UserID    string `json:"userId"`
@@ -86,11 +88,7 @@ func CaptureScreen(captureType CaptureType) error {
 		return fmt.Errorf("no displays")
 	}
 
-	dir := "D:\\trackingScreenShot"
-	os.MkdirAll(dir, os.ModePerm)
-
 	timestamp := time.Now().Unix()
-
 	action := string(captureType)
 	if captureType == CaptureRegular {
 		action = "regular"
@@ -100,22 +98,74 @@ func CaptureScreen(captureType CaptureType) error {
 		bounds := screenshot.GetDisplayBounds(i)
 		img, err := screenshot.CaptureRect(bounds)
 		if err != nil {
+			log.Println("Capture error:", err)
 			continue
 		}
 
-		filename := fmt.Sprintf("%s__%s__%s__%s__%d__%s.png",
+		// Encode PNG in memory
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, img); err != nil {
+			log.Println("PNG encode error:", err)
+			continue
+		}
+
+		// Prepare multipart/form-data
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+
+		// Add metadata fields
+		writer.WriteField("companyId", user.CompanyID)
+		writer.WriteField("userId", user.UserID)
+		writer.WriteField("localIP", localIP)
+		writer.WriteField("mac", macAddress)
+		writer.WriteField("timestamp", fmt.Sprintf("%d", timestamp))
+		writer.WriteField("type", action)
+
+		// Add file
+		fileName := fmt.Sprintf("%s__%s__%s__%s__%d__%s.png",
 			user.CompanyID, user.UserID, localIP, macAddress, timestamp, action)
 
-		filePath := filepath.Join(dir, filename)
-		f, err := os.Create(filePath)
+		part, err := writer.CreateFormFile("screenshot", fileName)
 		if err != nil {
+			log.Println("CreateFormFile error:", err)
+			writer.Close()
 			continue
 		}
-		png.Encode(f, img)
-		f.Close()
+
+		_, err = part.Write(buf.Bytes())
+		if err != nil {
+			log.Println("Write file error:", err)
+			writer.Close()
+			continue
+		}
+
+		writer.Close()
+
+		// Send POST request
+		req, err := http.NewRequest("POST", SERVER_URL, body)
+		if err != nil {
+			log.Println("HTTP request error:", err)
+			continue
+		}
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Println("Upload failed:", err)
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Println("Upload failed, status:", resp.Status)
+		} else {
+			log.Println("Uploaded screenshot:", fileName)
+		}
 	}
+
 	return nil
 }
+
 
 func startCaptureLoop() {
 	mu.Lock()
