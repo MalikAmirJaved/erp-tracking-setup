@@ -29,6 +29,11 @@ function startGoTracker() {
 
   trackerProcess = require("child_process").spawn(goExePath, [], {
     windowsHide: true,
+    cwd: path.dirname(goExePath), // ← critical!
+    env: {
+      ...process.env,
+      PATH: `${path.dirname(goExePath)};${process.env.PATH || ""}`, // helps Windows find cwebp
+    },
   });
 
   trackerProcess.on("error", (err) => {
@@ -134,7 +139,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-// ⬇️ ADD THIS BLOCK HERE
+  // ⬇️ ADD THIS BLOCK HERE
   mainWindow.webContents.on("before-input-event", (event, input) => {
     if (
       ((input.control || input.meta) && input.key.toLowerCase() === "r") ||

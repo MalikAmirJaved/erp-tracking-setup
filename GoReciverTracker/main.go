@@ -37,7 +37,7 @@ func main() {
 	http.HandleFunc("/health", healthCheckHandler)
 
 	port := ":3002"
-	log.Printf("🚀 Screenshot server running on http://localhost%s", port)
+	log.Printf("🚀 Screenshot server running on http://127.0.0.1%s", port)
 	log.Printf("📁 Base directory: %s", config.BaseDir)
 	log.Printf("📦 Max upload size: %d bytes", config.MaxUploadSize)
 	

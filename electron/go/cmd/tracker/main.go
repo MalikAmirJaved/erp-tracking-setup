@@ -11,18 +11,21 @@ import (
 	"fmt"
 	"image/png"
 	"io"
+	"io/ioutil"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
-	"mime/multipart"
 
 	"github.com/kbinani/screenshot"
 )
 
-const SERVER_URL = "http://localhost:3002/upload-screenshot"
+const SERVER_URL = "http://127.0.0.1:3002/upload-screenshot"
 
 // Encryption key - In production, this should come from secure storage
 // For now, using a fixed key. In production, use environment variables or key management service
@@ -129,11 +132,9 @@ func CaptureScreen(captureType CaptureType) error {
 		return fmt.Errorf("no displays")
 	}
 
-	timestamp := time.Now().Unix()
+	// Use nanoseconds to avoid filename collisions
+	timestamp := time.Now().UnixNano()
 	action := string(captureType)
-	if captureType == CaptureRegular {
-		action = "regular"
-	}
 
 	for i := 0; i < n; i++ {
 		bounds := screenshot.GetDisplayBounds(i)
@@ -143,41 +144,81 @@ func CaptureScreen(captureType CaptureType) error {
 			continue
 		}
 
-		// Encode PNG in memory
-		var buf bytes.Buffer
-		if err := png.Encode(&buf, img); err != nil {
+		var pngBuf bytes.Buffer
+		if err := png.Encode(&pngBuf, img); err != nil {
 			log.Println("PNG encode error:", err)
 			continue
 		}
 
-		// Encrypt the screenshot data
-		encryptedData, err := encryptData(buf.Bytes())
+		webpFileName := fmt.Sprintf("%s__%s__%s__%s__%d__%s.webp",
+			user.CompanyID,
+			user.UserID,
+			localIP,
+			macAddress,
+			timestamp,
+			action,
+		)
+
+		tmpPNG := webpFileName + ".png"
+
+		if err := ioutil.WriteFile(tmpPNG, pngBuf.Bytes(), 0644); err != nil {
+			log.Println("Temp PNG write error:", err)
+			continue
+		}
+
+		// Ensure temp PNG cleanup
+		defer os.Remove(tmpPNG)
+		defer os.Remove(webpFileName)
+
+		// Run cwebp
+		cmd := exec.Command("cwebp", tmpPNG, "-q", "20", "-o", webpFileName)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			log.Printf("cwebp error: %v | %s", err, stderr.String())
+			os.Remove(webpFileName)
+			continue
+		}
+
+		// Ensure WebP cleanup
+		defer os.Remove(webpFileName)
+
+		webpData, err := ioutil.ReadFile(webpFileName)
+		if err != nil {
+			log.Println("WebP read error:", err)
+			continue
+		}
+
+		encryptedData, err := encryptData(webpData)
 		if err != nil {
 			log.Println("Encryption error:", err)
 			continue
 		}
 
-		// Generate hash for verification
 		fileHash := generateFileHash(encryptedData)
 
-		// Prepare multipart/form-data
 		body := &bytes.Buffer{}
 		writer := multipart.NewWriter(body)
 
-		// Add metadata fields
 		writer.WriteField("companyId", user.CompanyID)
 		writer.WriteField("userId", user.UserID)
 		writer.WriteField("localIP", localIP)
 		writer.WriteField("mac", macAddress)
 		writer.WriteField("timestamp", fmt.Sprintf("%d", timestamp))
 		writer.WriteField("type", action)
-		writer.WriteField("encrypted", "true") // Flag indicating file is encrypted
-		writer.WriteField("fileHash", fileHash) // Hash for verification
-		writer.WriteField("algorithm", "AES-256-GCM") // Encryption algorithm used
+		writer.WriteField("encrypted", "true")
+		writer.WriteField("fileHash", fileHash)
+		writer.WriteField("algorithm", "AES-256-GCM")
 
-		// Add encrypted file
 		fileName := fmt.Sprintf("%s__%s__%s__%s__%d__%s.enc",
-			user.CompanyID, user.UserID, localIP, macAddress, timestamp, action)
+			user.CompanyID,
+			user.UserID,
+			localIP,
+			macAddress,
+			timestamp,
+			action,
+		)
 
 		part, err := writer.CreateFormFile("screenshot", fileName)
 		if err != nil {
@@ -186,8 +227,7 @@ func CaptureScreen(captureType CaptureType) error {
 			continue
 		}
 
-		_, err = part.Write(encryptedData)
-		if err != nil {
+		if _, err := part.Write(encryptedData); err != nil {
 			log.Println("Write file error:", err)
 			writer.Close()
 			continue
@@ -195,7 +235,6 @@ func CaptureScreen(captureType CaptureType) error {
 
 		writer.Close()
 
-		// Send POST request
 		req, err := http.NewRequest("POST", SERVER_URL, body)
 		if err != nil {
 			log.Println("HTTP request error:", err)
@@ -208,11 +247,13 @@ func CaptureScreen(captureType CaptureType) error {
 			log.Println("Upload failed:", err)
 			continue
 		}
-		defer resp.Body.Close()
+
+		// IMPORTANT: close immediately (no defer in loop)
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			log.Printf("Upload failed, status: %d, response: %s", resp.StatusCode, string(bodyBytes))
+			log.Printf("Upload failed, status: %d", resp.StatusCode)
 		} else {
 			log.Println("Uploaded encrypted screenshot:", fileName)
 		}
@@ -289,7 +330,7 @@ func main() {
 
 	// Log encryption status
 	log.Printf("Encryption enabled: Using AES-256-GCM")
-	
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/set-user", func(w http.ResponseWriter, r *http.Request) {

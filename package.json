@@ -45,8 +45,8 @@
         "to": "go/erp-monitoring.exe"
       },
       {
-        "from": "electron/ERPMonitoringDecoder.zip",
-        "to": "ERPMonitoringDecoder.zip"
+        "from": "electron/go/cwebp.exe",
+        "to": "go/cwebp.exe"
       }
     ],
     "asarUnpack": [
