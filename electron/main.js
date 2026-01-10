@@ -8,7 +8,7 @@ const store = new Store();
 let mainWindow;
 let tray;
 let trackerProcess = null;
-let currentUser = store.get("user") || null; // Persistent user
+let currentUser = store.get("user") || null;
 
 app.commandLine.appendSwitch("ignore-certificate-errors");
 app.commandLine.appendSwitch("allow-insecure-localhost");
@@ -16,33 +16,32 @@ app.setAsDefaultProtocolClient("erpmonitoring");
 
 function startGoTracker() {
   if (trackerProcess || !currentUser) return;
+
   let goExePath;
   if (app.isPackaged) {
     goExePath = path.join(process.resourcesPath, "go", "erp-monitoring.exe");
   } else {
     goExePath = path.join(__dirname, "go", "erp-monitoring.exe");
   }
+
   if (!fs.existsSync(goExePath)) {
-    console.error("Go tracker executable not found:", goExePath);
     return;
   }
 
   trackerProcess = require("child_process").spawn(goExePath, [], {
     windowsHide: true,
-    cwd: path.dirname(goExePath), // ← critical!
+    cwd: path.dirname(goExePath),
     env: {
       ...process.env,
-      PATH: `${path.dirname(goExePath)};${process.env.PATH || ""}`, // helps Windows find cwebp
+      PATH: `${path.dirname(goExePath)};${process.env.PATH || ""}`,
     },
   });
 
-  trackerProcess.on("error", (err) => {
-    console.error("Failed to start Go tracker:", err);
+  trackerProcess.on("error", () => {
     trackerProcess = null;
   });
 
-  trackerProcess.on("close", (code) => {
-    console.log("Go tracker exited with code:", code);
+  trackerProcess.on("close", () => {
     trackerProcess = null;
   });
 }
@@ -61,24 +60,20 @@ async function sendUserToGoAndAutoStart() {
         body: JSON.stringify(currentUser),
       });
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error();
 
       const startRes = await fetch("http://127.0.0.1:9090/start", {
         method: "POST",
       });
 
-      if (!startRes.ok) throw new Error(`Start failed ${startRes.status}`);
+      if (!startRes.ok) throw new Error();
 
-      // ONLY AFTER SUCCESS → notify renderer that tracking auto-started
       mainWindow?.webContents.send("auto-tracking-started");
-    } catch (err) {
+    } catch {
       attempts++;
-
-      if (attempts > MAX_SILENT_RETRIES) {
-        console.warn("Go service not ready yet, retrying...");
+      if (attempts <= MAX_SILENT_RETRIES) {
+        setTimeout(trySend, 1500);
       }
-
-      setTimeout(trySend, 1500);
     }
   };
 
@@ -102,7 +97,6 @@ function handleDeepLink(url) {
     currentUser = userInfo;
     store.set("user", currentUser);
 
-    // Kill old tracker process if running
     if (trackerProcess) {
       trackerProcess.kill();
       trackerProcess = null;
@@ -139,7 +133,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  // ⬇️ ADD THIS BLOCK HERE
+
   mainWindow.webContents.on("before-input-event", (event, input) => {
     if (
       ((input.control || input.meta) && input.key.toLowerCase() === "r") ||
@@ -148,6 +142,7 @@ function createWindow() {
       event.preventDefault();
     }
   });
+
   if (app.isPackaged) {
     mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
   } else {
