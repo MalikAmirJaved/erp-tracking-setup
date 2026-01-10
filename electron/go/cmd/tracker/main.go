@@ -2,9 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image/png"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +23,10 @@ import (
 )
 
 const SERVER_URL = "http://localhost:3002/upload-screenshot"
+
+// Encryption key - In production, this should come from secure storage
+// For now, using a fixed key. In production, use environment variables or key management service
+var ENCRYPTION_KEY = []byte("this-is-32-byte-long-key-for-aes") // 32 bytes
 
 type UserInfo struct {
 	UserID    string `json:"userId"`
@@ -68,6 +78,37 @@ func getMACAddress() string {
 	return "unknown-mac"
 }
 
+// encryptData encrypts the given data using AES-GCM
+func encryptData(data []byte) ([]byte, error) {
+	// Create a new AES cipher block
+	block, err := aes.NewCipher(ENCRYPTION_KEY)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %v", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %v", err)
+	}
+
+	// Create a nonce
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("failed to create nonce: %v", err)
+	}
+
+	// Encrypt the data
+	ciphertext := gcm.Seal(nonce, nonce, data, nil)
+	return ciphertext, nil
+}
+
+// generateFileHash creates a SHA256 hash of the encrypted data for verification
+func generateFileHash(data []byte) string {
+	hash := sha256.Sum256(data)
+	return base64.StdEncoding.EncodeToString(hash[:])
+}
+
 func CaptureScreen(captureType CaptureType) error {
 	mu.Lock()
 	user := currentUser
@@ -109,6 +150,16 @@ func CaptureScreen(captureType CaptureType) error {
 			continue
 		}
 
+		// Encrypt the screenshot data
+		encryptedData, err := encryptData(buf.Bytes())
+		if err != nil {
+			log.Println("Encryption error:", err)
+			continue
+		}
+
+		// Generate hash for verification
+		fileHash := generateFileHash(encryptedData)
+
 		// Prepare multipart/form-data
 		body := &bytes.Buffer{}
 		writer := multipart.NewWriter(body)
@@ -120,9 +171,12 @@ func CaptureScreen(captureType CaptureType) error {
 		writer.WriteField("mac", macAddress)
 		writer.WriteField("timestamp", fmt.Sprintf("%d", timestamp))
 		writer.WriteField("type", action)
+		writer.WriteField("encrypted", "true") // Flag indicating file is encrypted
+		writer.WriteField("fileHash", fileHash) // Hash for verification
+		writer.WriteField("algorithm", "AES-256-GCM") // Encryption algorithm used
 
-		// Add file
-		fileName := fmt.Sprintf("%s__%s__%s__%s__%d__%s.png",
+		// Add encrypted file
+		fileName := fmt.Sprintf("%s__%s__%s__%s__%d__%s.enc",
 			user.CompanyID, user.UserID, localIP, macAddress, timestamp, action)
 
 		part, err := writer.CreateFormFile("screenshot", fileName)
@@ -132,7 +186,7 @@ func CaptureScreen(captureType CaptureType) error {
 			continue
 		}
 
-		_, err = part.Write(buf.Bytes())
+		_, err = part.Write(encryptedData)
 		if err != nil {
 			log.Println("Write file error:", err)
 			writer.Close()
@@ -154,18 +208,18 @@ func CaptureScreen(captureType CaptureType) error {
 			log.Println("Upload failed:", err)
 			continue
 		}
-		resp.Body.Close()
+		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			log.Println("Upload failed, status:", resp.Status)
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			log.Printf("Upload failed, status: %d, response: %s", resp.StatusCode, string(bodyBytes))
 		} else {
-			log.Println("Uploaded screenshot:", fileName)
+			log.Println("Uploaded encrypted screenshot:", fileName)
 		}
 	}
 
 	return nil
 }
-
 
 func startCaptureLoop() {
 	mu.Lock()
@@ -233,6 +287,9 @@ func main() {
 	localIP = getLocalIP()
 	macAddress = getMACAddress()
 
+	// Log encryption status
+	log.Printf("Encryption enabled: Using AES-256-GCM")
+	
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/set-user", func(w http.ResponseWriter, r *http.Request) {
@@ -274,17 +331,17 @@ func main() {
 	})
 
 	mux.HandleFunc("/stop", func(w http.ResponseWriter, r *http.Request) {
-    mu.Lock()
-    wasRunning := isRunning
-    mu.Unlock()
+		mu.Lock()
+		wasRunning := isRunning
+		mu.Unlock()
 
-    if wasRunning {
-        CaptureScreen(CaptureStop)  // ← Capture with "stop" action
-    }
+		if wasRunning {
+			CaptureScreen(CaptureStop) // ← Capture with "stop" action
+		}
 
-    stopCaptureLoop()
-    w.Write([]byte("stopped"))
-})
+		stopCaptureLoop()
+		w.Write([]byte("stopped"))
+	})
 
 	// Dedicated break endpoint
 	mux.HandleFunc("/break", func(w http.ResponseWriter, r *http.Request) {
