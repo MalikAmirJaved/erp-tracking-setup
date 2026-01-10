@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ func main() {
 
 	http.HandleFunc("/upload-screenshot", uploadScreenshotHandler)
 	http.HandleFunc("/health", healthCheckHandler)
-
+	log.Printf("🚀 Screenshot server running on http://127.0.0.1:3002")
 	http.ListenAndServe(":3002", nil)
 }
 

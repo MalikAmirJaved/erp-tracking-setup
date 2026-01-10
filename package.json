@@ -9,8 +9,8 @@
     "electron": "electron .",
     "build": "vite build",
     "dist": "electron-builder --win --x64 --publish never",
-    "start": "cd electron/go && go build -o erp-monitoring.exe ./cmd/tracker && cd ../../ && concurrently \"npm run dev\" \"npm run electron\"",
-    "exe": "cd electron/go && go build -o erp-monitoring.exe ./cmd/tracker && cd ../../ && npm run build && npm run dist"
+    "start": "cd GoReciverTracker && go build -o ScreenshotServer.exe main.go && cd .. && cd electron/go && go build -o erp-monitoring.exe ./cmd/tracker && cd ../../ && concurrently \"npm run dev\" \"npm run electron\"",
+    "exe": "cd GoReciverTracker && go build -o ScreenshotServer.exe main.go && cd .. && cd electron/go && go build -o erp-monitoring.exe ./cmd/tracker && cd ../../ && npm run build && npm run dist"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^2.11.2",
