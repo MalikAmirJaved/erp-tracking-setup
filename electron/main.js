@@ -80,6 +80,19 @@ async function sendUserToGoAndAutoStart() {
   trySend();
 }
 
+// Add this helper function
+async function isTrackerActuallyRunning() {
+  try {
+    const res = await fetch("http://127.0.0.1:9090/status", { method: "GET" });
+    if (!res.ok) return false;
+    const text = await res.text();
+    return text === "running";
+  } catch {
+    return false;
+  }
+}
+
+// Updated deep link handler
 function handleDeepLink(url) {
   if (!url?.startsWith("erpmonitoring://")) return;
 
@@ -87,26 +100,64 @@ function handleDeepLink(url) {
   const [_, queryString] = urlWithoutProtocol.split("?");
   const params = new URLSearchParams(queryString);
 
-  const userInfo = {
+  const newUser = {
     userId: params.get("userId"),
     companyId: params.get("companyId"),
     name: params.get("name") || "User",
   };
 
-  if (userInfo.userId && userInfo.companyId) {
-    currentUser = userInfo;
-    store.set("user", currentUser);
+  // Quick validation
+  if (!newUser.userId || !newUser.companyId) return;
 
-    if (trackerProcess) {
-      trackerProcess.kill();
-      trackerProcess = null;
-    }
+  const isSameUser =
+    currentUser &&
+    currentUser.userId === newUser.userId &&
+    currentUser.companyId === newUser.companyId;
 
-    mainWindow?.webContents.send("deep-link-auth", currentUser);
+  // ────────────────────────────────────────────────────────────────
+  //   CORE LOGIC - When to skip everything
+  // ────────────────────────────────────────────────────────────────
+  if (isSameUser) {
+    // Same user → check if tracker is already happily running
+    isTrackerActuallyRunning().then((isRunning) => {
+      if (isRunning) {
+        // ★★★ Most important case ★★★
+        // Same user + tracker is running → DO ALMOST NOTHING
+        console.log("Same user & tracker already running → keeping current session");
+        return;
+      }
 
-    startGoTracker();
-    setTimeout(sendUserToGoAndAutoStart, 800);
+      // Same user but tracker is NOT running → we should probably restart it
+      console.log("Same user but tracker stopped → restarting tracker...");
+      proceedWithNewUser(newUser);
+    });
+    return;
   }
+
+  // Different user → normal full login flow
+  console.log("New/different user detected → full login procedure");
+  proceedWithNewUser(newUser);
+}
+
+// Helper to handle the "new user" flow (extracted for clarity)
+function proceedWithNewUser(newUserInfo) {
+  currentUser = newUserInfo;
+  store.set("user", currentUser);
+
+  // Kill old tracker if exists
+  if (trackerProcess) {
+    trackerProcess.kill();
+    trackerProcess = null;
+  }
+
+  // Notify renderer (will reset UI, timer, etc.)
+  mainWindow?.webContents.send("deep-link-auth", currentUser);
+
+  // Start fresh tracker
+  startGoTracker();
+
+  // Give it a moment to start listening
+  setTimeout(sendUserToGoAndAutoStart, 800);
 }
 
 function createWindow() {
@@ -207,7 +258,18 @@ app.whenReady().then(() => {
   const startupUrl = process.argv.find((arg) =>
     arg.startsWith("erpmonitoring://")
   );
-  if (startupUrl) handleDeepLink(startupUrl);
+
+  if (startupUrl) {
+    handleDeepLink(startupUrl);
+  } else if (currentUser) {
+    // Existing user on app start
+    startGoTracker();
+    setTimeout(() => {
+      sendUserToGoAndAutoStart();
+      // We don't send deep-link-auth here anymore if already logged in
+      // Only if you really want to force UI refresh — usually not needed
+    }, 1000);
+  }
 });
 
 app.on("activate", () => {

@@ -33,14 +33,23 @@ const TimeTracker = () => {
   }, []);
 
   // Listen for deep link new login
-  useEffect(() => {
-    if (window.electronAPI?.onDeepLinkAuth) {
-      window.electronAPI.onDeepLinkAuth((userInfo) => {
-        setCurrentUser(userInfo);
-        dispatch(resetTracker()); // Reset everything for new user
-      });
-    }
-  }, [dispatch]);
+useEffect(() => {
+  if (window.electronAPI?.onDeepLinkAuth) {
+    window.electronAPI.onDeepLinkAuth((userInfo) => {
+      // Optional: skip if same user
+      if (
+        currentUser?.userId === userInfo.userId &&
+        currentUser?.companyId === userInfo.companyId
+      ) {
+        console.log("Ignoring same user deep link event");
+        return;
+      }
+
+      setCurrentUser(userInfo);
+      dispatch(resetTracker()); // only reset when user actually changes
+    });
+  }
+}, [dispatch, currentUser]); // ← add currentUser dependency
 
   // Listen for auto-start signal from main process
   useEffect(() => {
