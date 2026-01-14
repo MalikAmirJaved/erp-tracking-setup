@@ -225,7 +225,7 @@ func startCaptureLoop() {
 	}
 	isRunning = true
 	isOnBreak = false
-	ticker = time.NewTicker(30 * time.Second)
+	ticker = time.NewTicker(60 * time.Second)
 	stopChan = make(chan struct{})
 	mu.Unlock()
 

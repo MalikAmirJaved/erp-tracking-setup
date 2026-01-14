@@ -3,6 +3,11 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, screen } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const Store = require("electron-store");
+const { autoUpdater } = require("electron-updater");
+const log = require("electron-log");
+log.transports.file.level = "info";
+autoUpdater.logger = log;
+autoUpdater.autoDownload = true;
 
 const store = new Store();
 let mainWindow;
@@ -13,6 +18,26 @@ let currentUser = store.get("user") || null;
 app.commandLine.appendSwitch("ignore-certificate-errors");
 app.commandLine.appendSwitch("allow-insecure-localhost");
 app.setAsDefaultProtocolClient("erpmonitoring");
+
+function initAutoUpdater() {
+  if (!app.isPackaged) return;
+
+  autoUpdater.checkForUpdatesAndNotify();
+
+  autoUpdater.on("update-available", () => {
+    log.info("Update available");
+  });
+
+  autoUpdater.on("update-downloaded", () => {
+    log.info("Update downloaded, restarting...");
+    autoUpdater.quitAndInstall();
+  });
+
+  autoUpdater.on("error", (err) => {
+    log.error("Auto update error:", err);
+  });
+}
+
 
 function startGoTracker() {
   if (trackerProcess || !currentUser) return;
@@ -236,7 +261,9 @@ ipcMain.on("hide-window", () => mainWindow?.hide());
 ipcMain.handle("get-user", () => {
   return store.get("user") || null;
 });
-
+ipcMain.handle("get-app-version", () => {
+  return app.getVersion();
+});
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
@@ -254,7 +281,7 @@ if (!gotTheLock) {
 app.whenReady().then(() => {
   createWindow();
   createTray();
-
+initAutoUpdater();
   const startupUrl = process.argv.find((arg) =>
     arg.startsWith("erpmonitoring://")
   );

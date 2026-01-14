@@ -33,23 +33,23 @@ const TimeTracker = () => {
   }, []);
 
   // Listen for deep link new login
-useEffect(() => {
-  if (window.electronAPI?.onDeepLinkAuth) {
-    window.electronAPI.onDeepLinkAuth((userInfo) => {
-      // Optional: skip if same user
-      if (
-        currentUser?.userId === userInfo.userId &&
-        currentUser?.companyId === userInfo.companyId
-      ) {
-        console.log("Ignoring same user deep link event");
-        return;
-      }
+  useEffect(() => {
+    if (window.electronAPI?.onDeepLinkAuth) {
+      window.electronAPI.onDeepLinkAuth((userInfo) => {
+        // Optional: skip if same user
+        if (
+          currentUser?.userId === userInfo.userId &&
+          currentUser?.companyId === userInfo.companyId
+        ) {
+          console.log("Ignoring same user deep link event");
+          return;
+        }
 
-      setCurrentUser(userInfo);
-      dispatch(resetTracker()); // only reset when user actually changes
-    });
-  }
-}, [dispatch, currentUser]); // ← add currentUser dependency
+        setCurrentUser(userInfo);
+        dispatch(resetTracker()); // only reset when user actually changes
+      });
+    }
+  }, [dispatch, currentUser]); // ← add currentUser dependency
 
   // Listen for auto-start signal from main process
   useEffect(() => {
@@ -59,7 +59,14 @@ useEffect(() => {
       });
     }
   }, [dispatch]);
+  const [version, setVersion] = useState("");
 
+  useEffect(() => {
+    // Fetch version from Electron
+    window.electronAPI.getAppVersion().then((v) => {
+      setVersion(v);
+    });
+  }, []);
   const formatTime = (seconds) => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -115,13 +122,16 @@ useEffect(() => {
       {/* Main content */}
       <div className="flex flex-col justify-between h-full py-3">
         <div>
-          <h1 className="font-semibold text-foreground w-full truncate ml-4">
-            Good morning,{" "}
-            <span className="text-blue-700">
-              {currentUser?.name || "Unknown"}{" "}
-            </span>
-            👋
-          </h1>
+          <div className="flex justify-between mx-4 item-center">
+            <h1 className="font-semibold text-foreground w-full truncate">
+              Good morning,{" "}
+              <span className="text-blue-700">
+                {currentUser?.name || "Unknown"}{" "}
+              </span>
+              👋
+            </h1>
+            <h1 className="text-gray-700 text-sm ">v{version}</h1>
+          </div>
           <div className="">
             <div className=" flex items-center gap-4 justify-between mx-5 text-xl">
               <span className="  font-bold text-orange-700 ">

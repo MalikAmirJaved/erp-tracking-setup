@@ -12,4 +12,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onDeepLinkAuth: (callback) =>
     ipcRenderer.on("deep-link-auth", (_event, userInfo) => callback(userInfo)),
   getUser: () => ipcRenderer.invoke("get-user"),
+  getAppVersion: () => ipcRenderer.invoke("get-app-version")
+
 });
