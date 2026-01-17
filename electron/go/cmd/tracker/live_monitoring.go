@@ -318,33 +318,6 @@ func cleanupSessionsForClient(client *ClientConnection) {
 // Optional HTTP endpoints (if needed by frontend)
 // ────────────────────────────────────────────────
 
-func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		CompanyID string `json:"companyId"`
-		UserID    string `json:"userId"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	key := fmt.Sprintf("%s_%s_user", req.CompanyID, req.UserID)
-
-	connections.RLock()
-	_, online := connections.clients[key]
-	connections.RUnlock()
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"online": online,
-		"userId": req.UserID,
-	})
-}
-
 func getActiveSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	companyID := r.URL.Query().Get("companyId")
 	adminID := r.URL.Query().Get("adminId")

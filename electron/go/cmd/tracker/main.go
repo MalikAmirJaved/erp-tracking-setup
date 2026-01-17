@@ -29,7 +29,6 @@ func main() {
 	
 	// Live monitoring routes
 	mux.HandleFunc("/ws-live", liveMonitoringWebSocket)
-	mux.HandleFunc("/check-user-status", checkUserStatusHandler)
 	mux.HandleFunc("/active-sessions", getActiveSessionsHandler)
 
 	// Apply CORS middleware

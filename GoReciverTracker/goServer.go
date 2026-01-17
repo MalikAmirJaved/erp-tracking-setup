@@ -98,15 +98,19 @@ func main() {
 		log.Fatal("Cannot create screenshot directory:", err)
 	}
 
-	http.HandleFunc("/upload-screenshot", uploadScreenshotHandler)
-	http.HandleFunc("/health", healthCheckHandler)
-	http.HandleFunc("/ws/live", signalingWebSocketHandler)
-	http.HandleFunc("/check-user-status", checkUserStatusHandler)
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/upload-screenshot", uploadScreenshotHandler)
+	mux.HandleFunc("/health", healthCheckHandler)
+	mux.HandleFunc("/ws/live", signalingWebSocketHandler)
+	mux.HandleFunc("/check-user-status", checkUserStatusHandler)
 
 	log.Printf("Server listening on http://localhost%s", listenAddr)
-	log.Printf("Signaling endpoint:        ws://localhost%s/ws/live", listenAddr)
 
-	log.Fatal(http.ListenAndServe(listenAddr, nil))
+	// ✅ Wrap with CORS
+	handler := withCORS(mux)
+
+	log.Fatal(http.ListenAndServe(listenAddr, handler))
 }
 
 // ────────────────────────────────────────────────
@@ -403,7 +407,9 @@ func signalingWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 // Check if user is online
 // ────────────────────────────────────────────────
 
-func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) { 
+func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("📡 Checking active user")
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -413,17 +419,65 @@ func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
 		CompanyID string `json:"companyId"`
 		UserID    string `json:"userId"`
 	}
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("📡 company=%s user=%s\n", req.CompanyID, req.UserID)
 
 	key := "user_" + req.UserID
 
 	connections.RLock()
 	_, online := connections.clients[key]
 	connections.RUnlock()
-
+logAllActiveUsers()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"online": online})
+	json.NewEncoder(w).Encode(map[string]bool{
+		"online": online,
+	})
+}
+
+func logAllActiveUsers() {
+	connections.RLock()
+	defer connections.RUnlock()
+
+	log.Println("🟢 Active WebSocket Clients:")
+
+	if len(connections.clients) == 0 {
+		log.Println("   (none)")
+		return
+	}
+
+	for peerID, client := range connections.clients {
+		log.Printf(
+			"   peerID=%s | userID=%s | company=%s | role=%s\n",
+			peerID,
+			client.userID,
+			client.companyID,
+			client.role,
+		)
+	}
+}
+
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		// Allow your frontend
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3001")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		// Handle preflight
+		if r.Method == http.MethodOptions {
+			log.Println("✅ CORS preflight:", r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
