@@ -1,4 +1,5 @@
-// main.go (updated)
+// Go client
+
 package main
 
 import (

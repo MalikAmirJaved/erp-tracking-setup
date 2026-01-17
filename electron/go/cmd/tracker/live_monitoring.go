@@ -1,4 +1,7 @@
 // live_monitoring.go
+// Contains all live monitoring WebSocket logic for the employee agent
+// This file is part of the same binary as main.go
+
 package main
 
 import (
@@ -12,47 +15,38 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// ────────────────────────────────────────────────
-// WebRTC Signaling Server
-// ────────────────────────────────────────────────
-
 var (
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			return true // For development, allow all origins
+			return true
 		},
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 	}
 
-	// Active connections
 	connections = struct {
 		sync.RWMutex
-		clients map[string]*ClientConnection
-	}{clients: make(map[string]*ClientConnection)}
+		clients map[string]*ClientConnection // key = company_user_role
+	}{
+		clients: make(map[string]*ClientConnection),
+	}
+
+	activeSessions = struct {
+		sync.RWMutex
+		sessions map[string]*LiveSession
+	}{
+		sessions: make(map[string]*LiveSession),
+	}
 )
 
-// ClientConnection represents a WebSocket connection
 type ClientConnection struct {
 	conn      *websocket.Conn
 	userID    string
 	companyID string
 	role      string // "admin" or "user"
-	peerID    string
+	peerID    string // "admin_xxx" or "user_xxx"
 }
 
-// WebRTC Signaling Message
-type SignalingMessage struct {
-	Type      string          `json:"type"` // offer, answer, candidate, join, leave, error, status
-	From      string          `json:"from"`
-	To        string          `json:"to"`
-	Data      json.RawMessage `json:"data"`
-	PeerID    string          `json:"peerId"`
-	UserID    string          `json:"userId"`
-	CompanyID string          `json:"companyId"`
-}
-
-// LiveSession represents an active live monitoring session
 type LiveSession struct {
 	AdminConnection *ClientConnection
 	UserConnection  *ClientConnection
@@ -60,16 +54,18 @@ type LiveSession struct {
 	IsActive        bool
 }
 
-var (
-	activeSessions = struct {
-		sync.RWMutex
-		sessions map[string]*LiveSession
-	}{sessions: make(map[string]*LiveSession)}
-)
+type SignalingMessage struct {
+	Type      string          `json:"type"`
+	From      string          `json:"from,omitempty"`
+	To        string          `json:"to,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	PeerID    string          `json:"peerId,omitempty"`
+	UserID    string          `json:"userId,omitempty"`
+	CompanyID string          `json:"companyId,omitempty"`
+}
 
-// WebSocket handler for live monitoring signaling
+// WebSocket handler for live monitoring (employee agent side)
 func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
-	log.Printf("i am heree:")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
@@ -77,24 +73,20 @@ func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Read initial connection info
 	var initMsg SignalingMessage
-	err = conn.ReadJSON(&initMsg)
-	if err != nil {
-		log.Printf("Failed to read initial message: %v", err)
+	if err := conn.ReadJSON(&initMsg); err != nil {
+		log.Printf("Failed to read initial join message: %v", err)
 		return
 	}
 
-	// Validate initial message
-	if initMsg.Type != "join" || initMsg.UserID == "" || initMsg.CompanyID == "" {
+	if initMsg.Type != "join-live" || initMsg.UserID == "" || initMsg.CompanyID == "" || initMsg.PeerID == "" {
 		conn.WriteJSON(SignalingMessage{
 			Type: "error",
-			Data: json.RawMessage(`{"message": "Invalid join message"}`),
+			Data: json.RawMessage(`{"message":"invalid join message"}`),
 		})
 		return
 	}
 
-	// Create client connection
 	client := &ClientConnection{
 		conn:      conn,
 		userID:    initMsg.UserID,
@@ -103,201 +95,149 @@ func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 		peerID:    initMsg.PeerID,
 	}
 
-	clientID := fmt.Sprintf("%s_%s_%s", initMsg.CompanyID, initMsg.UserID, initMsg.From)
+	clientKey := fmt.Sprintf("%s_%s_%s", initMsg.CompanyID, initMsg.UserID, initMsg.From)
 
-	// Register client
 	connections.Lock()
-	connections.clients[clientID] = client
+	connections.clients[clientKey] = client
 	connections.Unlock()
 
-	log.Printf("Client connected: %s (Role: %s)", clientID, initMsg.From)
+	log.Printf("Live monitoring client connected: %s (role: %s)", clientKey, client.role)
 
-	// Send connection confirmation
+	// Send confirmation
 	conn.WriteJSON(SignalingMessage{
 		Type: "connected",
 		From: "server",
-		To:   initMsg.From,
-		Data: json.RawMessage(fmt.Sprintf(`{"clientId": "%s"}`, clientID)),
+		Data: json.RawMessage(fmt.Sprintf(`{"clientId":"%s"}`, clientKey)),
 	})
 
-	// If admin joins, check if target user is online
-	if initMsg.From == "admin" {
-		targetUserID := string(initMsg.Data)
-		userClientID := fmt.Sprintf("%s_%s_user", initMsg.CompanyID, targetUserID)
-
-		connections.RLock()
-		_, userExists := connections.clients[userClientID]
-		connections.RUnlock()
-
-		if userExists {
-			// Notify admin that user is online
-			conn.WriteJSON(SignalingMessage{
-				Type: "user-status",
-				From: "server",
-				To:   "admin",
-				Data: json.RawMessage(`{"online": true, "userId": "` + targetUserID + `"}`),
-			})
-		} else {
-			conn.WriteJSON(SignalingMessage{
-				Type: "user-status",
-				From: "server",
-				To:   "admin",
-				Data: json.RawMessage(`{"online": false, "userId": "` + targetUserID + `"}`),
-			})
-		}
-	}
-
-	// Handle messages
+	// Message loop
 	for {
 		var msg SignalingMessage
-		err := conn.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("Client disconnected: %v", err)
+		if err := conn.ReadJSON(&msg); err != nil {
+			log.Printf("WebSocket read error for %s: %v", clientKey, err)
 			break
 		}
 
 		handleSignalingMessage(client, msg)
 	}
 
-	// Cleanup on disconnect
+	// Cleanup
 	connections.Lock()
-	delete(connections.clients, clientID)
+	delete(connections.clients, clientKey)
 	connections.Unlock()
 
-	// Clean up any active sessions
-	activeSessions.Lock()
-	for sessionID, session := range activeSessions.sessions {
-		if (session.AdminConnection != nil && session.AdminConnection.userID == client.userID) ||
-			(session.UserConnection != nil && session.UserConnection.userID == client.userID) {
-			session.IsActive = false
+	cleanupSessionsForClient(client)
 
-			// Notify other party
-			if client.role == "admin" && session.UserConnection != nil {
-				session.UserConnection.conn.WriteJSON(SignalingMessage{
-					Type: "session-ended",
-					From: "server",
-					To:   "user",
-					Data: json.RawMessage(`{"reason": "admin disconnected"}`),
-				})
-			} else if client.role == "user" && session.AdminConnection != nil {
-				session.AdminConnection.conn.WriteJSON(SignalingMessage{
-					Type: "session-ended",
-					From: "server",
-					To:   "admin",
-					Data: json.RawMessage(`{"reason": "user disconnected"}`),
-				})
-			}
-
-			delete(activeSessions.sessions, sessionID)
-		}
-	}
-	activeSessions.Unlock()
-
-	log.Printf("Client disconnected: %s", clientID)
+	log.Printf("Live monitoring client disconnected: %s", clientKey)
 }
 
 func handleSignalingMessage(client *ClientConnection, msg SignalingMessage) {
 	switch msg.Type {
-	case "offer":
-		// Forward offer to target user
-		forwardToTarget(client, msg)
-	case "answer":
-		// Forward answer to admin
-		forwardToTarget(client, msg)
-	case "candidate":
-		// Forward ICE candidate
-		forwardToTarget(client, msg)
 	case "request-live":
+		// Only admins should send this — ignore if not admin
+		if client.role != "admin" {
+			return
+		}
 		handleLiveRequest(client, msg)
+
 	case "accept-live":
+		if client.role != "user" {
+			return
+		}
 		handleLiveAccept(client, msg)
+
 	case "reject-live":
+		if client.role != "user" {
+			return
+		}
 		handleLiveReject(client, msg)
+
 	case "end-live":
 		handleLiveEnd(client, msg)
+
+	case "webrtc-offer", "webrtc-answer", "webrtc-candidate":
+		forwardToTarget(client, msg)
 	}
 }
 
 func forwardToTarget(sender *ClientConnection, msg SignalingMessage) {
-	targetID := fmt.Sprintf("%s_%s_%s", sender.companyID, msg.To, getOppositeRole(sender.role))
+	var targetPeer string
+	switch msg.Type {
+	case "webrtc-offer", "webrtc-answer", "webrtc-candidate":
+		var payload struct {
+			To string `json:"to"`
+		}
+		if err := json.Unmarshal(msg.Data, &payload); err == nil && payload.To != "" {
+			targetPeer = payload.To
+		}
+	}
+
+	if targetPeer == "" {
+		return
+	}
 
 	connections.RLock()
-	targetClient, exists := connections.clients[targetID]
+	target, exists := connections.clients[targetPeer]
 	connections.RUnlock()
 
-	if exists {
-		// Update the message to include sender info
-		msg.From = sender.userID
-		err := targetClient.conn.WriteJSON(msg)
-		if err != nil {
-			log.Printf("Failed to forward message to %s: %v", targetID, err)
+	if exists && target.conn != nil {
+		msg.From = sender.peerID
+		if err := target.conn.WriteJSON(msg); err != nil {
+			log.Printf("Failed to forward %s to %s: %v", msg.Type, targetPeer, err)
 		}
 	}
 }
 
-func handleLiveRequest(adminClient *ClientConnection, msg SignalingMessage) {
-	userID := string(msg.Data)
-	userClientID := fmt.Sprintf("%s_%s_user", adminClient.companyID, userID)
+func handleLiveRequest(admin *ClientConnection, msg SignalingMessage) {
+	var targetUserID string
+	if err := json.Unmarshal(msg.Data, &targetUserID); err != nil {
+		return
+	}
+
+	userKey := fmt.Sprintf("%s_%s_user", admin.companyID, targetUserID)
 
 	connections.RLock()
-	userClient, userExists := connections.clients[userClientID]
+	userConn, exists := connections.clients[userKey]
 	connections.RUnlock()
 
-	if !userExists {
-		adminClient.conn.WriteJSON(SignalingMessage{
+	if !exists {
+		admin.conn.WriteJSON(SignalingMessage{
 			Type: "error",
-			From: "server",
-			To:   "admin",
-			Data: json.RawMessage(`{"message": "User not online"}`),
+			Data: json.RawMessage(`{"msg":"User offline"}`),
 		})
 		return
 	}
 
-	// Send live request to user
-	requestMsg := SignalingMessage{
+	userConn.conn.WriteJSON(SignalingMessage{
 		Type:      "live-request",
-		From:      adminClient.userID,
-		To:        userID,
-		UserID:    adminClient.userID,
-		CompanyID: adminClient.companyID,
-		Data:      json.RawMessage(fmt.Sprintf(`{"adminId": "%s", "companyId": "%s"}`, adminClient.userID, adminClient.companyID)),
-	}
-
-	err := userClient.conn.WriteJSON(requestMsg)
-	if err != nil {
-		log.Printf("Failed to send live request: %v", err)
-		adminClient.conn.WriteJSON(SignalingMessage{
-			Type: "error",
-			From: "server",
-			To:   "admin",
-			Data: json.RawMessage(`{"message": "Failed to send request"}`),
-		})
-	}
+		From:      admin.userID,
+		To:        targetUserID,
+		CompanyID: admin.companyID,
+		Data:      json.RawMessage(fmt.Sprintf(`{"adminId":"%s"}`, admin.userID)),
+	})
 }
 
-func handleLiveAccept(userClient *ClientConnection, msg SignalingMessage) {
-	adminID := string(msg.Data)
-	adminClientID := fmt.Sprintf("%s_%s_admin", userClient.companyID, adminID)
-
-	connections.RLock()
-	adminClient, adminExists := connections.clients[adminClientID]
-	connections.RUnlock()
-
-	if !adminExists {
-		userClient.conn.WriteJSON(SignalingMessage{
-			Type: "error",
-			From: "server",
-			To:   "user",
-			Data: json.RawMessage(`{"message": "Admin not found"}`),
-		})
+func handleLiveAccept(user *ClientConnection, msg SignalingMessage) {
+	var adminID string
+	if err := json.Unmarshal(msg.Data, &adminID); err != nil {
 		return
 	}
 
-	// Create session
-	sessionID := fmt.Sprintf("%s_%s_%s", userClient.companyID, adminID, userClient.userID)
+	adminKey := fmt.Sprintf("%s_%s_admin", user.companyID, adminID)
+
+	connections.RLock()
+	adminConn, ok := connections.clients[adminKey]
+	connections.RUnlock()
+
+	if !ok {
+		return
+	}
+
+	sessionID := fmt.Sprintf("sess_%s_%s_%s", user.companyID, adminID, user.userID)
+
 	session := &LiveSession{
-		AdminConnection: adminClient,
-		UserConnection:  userClient,
+		AdminConnection: adminConn,
+		UserConnection:  user,
 		StartedAt:       time.Now(),
 		IsActive:        true,
 	}
@@ -306,151 +246,125 @@ func handleLiveAccept(userClient *ClientConnection, msg SignalingMessage) {
 	activeSessions.sessions[sessionID] = session
 	activeSessions.Unlock()
 
-	// Notify admin
-	adminClient.conn.WriteJSON(SignalingMessage{
+	adminConn.conn.WriteJSON(SignalingMessage{
 		Type: "live-accepted",
-		From: userClient.userID,
-		To:   adminID,
-		Data: json.RawMessage(fmt.Sprintf(`{"sessionId": "%s", "userId": "%s"}`, sessionID, userClient.userID)),
+		From: user.userID,
+		Data: json.RawMessage(fmt.Sprintf(`{"sessionId":"%s","userId":"%s"}`, sessionID, user.userID)),
 	})
-
-	log.Printf("Live session started: %s", sessionID)
 }
 
-func handleLiveReject(userClient *ClientConnection, msg SignalingMessage) {
-	adminID := string(msg.Data)
-	adminClientID := fmt.Sprintf("%s_%s_admin", userClient.companyID, adminID)
+func handleLiveReject(user *ClientConnection, msg SignalingMessage) {
+	var adminID string
+	if err := json.Unmarshal(msg.Data, &adminID); err != nil {
+		return
+	}
+
+	adminKey := fmt.Sprintf("%s_%s_admin", user.companyID, adminID)
 
 	connections.RLock()
-	adminClient, adminExists := connections.clients[adminClientID]
+	admin, ok := connections.clients[adminKey]
 	connections.RUnlock()
 
-	if adminExists {
-		adminClient.conn.WriteJSON(SignalingMessage{
+	if ok {
+		admin.conn.WriteJSON(SignalingMessage{
 			Type: "live-rejected",
-			From: userClient.userID,
-			To:   adminID,
-			Data: json.RawMessage(`{"message": "User rejected live monitoring request"}`),
+			From: user.userID,
+			Data: json.RawMessage(`{"msg":"rejected"}`),
 		})
 	}
 }
 
 func handleLiveEnd(client *ClientConnection, msg SignalingMessage) {
-	sessionID := string(msg.Data)
+	var sessionID string
+	if err := json.Unmarshal(msg.Data, &sessionID); err != nil {
+		return
+	}
 
 	activeSessions.Lock()
 	session, exists := activeSessions.sessions[sessionID]
 	if exists {
 		session.IsActive = false
 
-		// Notify other party
 		if client.role == "admin" && session.UserConnection != nil {
 			session.UserConnection.conn.WriteJSON(SignalingMessage{
 				Type: "session-ended",
-				From: "server",
-				To:   "user",
-				Data: json.RawMessage(`{"reason": "ended by admin"}`),
+				Data: json.RawMessage(`{"reason":"ended by admin"}`),
 			})
 		} else if client.role == "user" && session.AdminConnection != nil {
 			session.AdminConnection.conn.WriteJSON(SignalingMessage{
 				Type: "session-ended",
-				From: "server",
-				To:   "admin",
-				Data: json.RawMessage(`{"reason": "ended by user"}`),
+				Data: json.RawMessage(`{"reason":"ended by user"}`),
 			})
 		}
 
 		delete(activeSessions.sessions, sessionID)
-		log.Printf("Live session ended: %s", sessionID)
 	}
 	activeSessions.Unlock()
 }
 
-func getOppositeRole(role string) string {
-	if role == "admin" {
-		return "user"
+func cleanupSessionsForClient(client *ClientConnection) {
+	activeSessions.Lock()
+	for id, s := range activeSessions.sessions {
+		if (s.AdminConnection != nil && s.AdminConnection.userID == client.userID) ||
+			(s.UserConnection != nil && s.UserConnection.userID == client.userID) {
+			s.IsActive = false
+			delete(activeSessions.sessions, id)
+		}
 	}
-	return "admin"
+	activeSessions.Unlock()
 }
 
-// HTTP endpoint to check if user is available for live monitoring
+// ────────────────────────────────────────────────
+// Optional HTTP endpoints (if needed by frontend)
+// ────────────────────────────────────────────────
+
 func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
-
-	// Handle CORS preflight (VERY important if frontend is separate)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	defer r.Body.Close()
-
-	type StatusRequest struct {
-		UserID    string `json:"userId"`
+	var req struct {
 		CompanyID string `json:"companyId"`
+		UserID    string `json:"userId"`
 	}
-
-	var req StatusRequest
-
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&req); err != nil {
-		log.Println("❌ Decode error:", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// ✅ NOW log it
-	log.Println("✅ Decoded request:", req)
-
-	if req.UserID == "" || req.CompanyID == "" {
-		http.Error(w, "userId and companyId are required", http.StatusBadRequest)
-		return
-	}
-
-	userClientID := fmt.Sprintf("%s_%s_user", req.CompanyID, req.UserID)
+	key := fmt.Sprintf("%s_%s_user", req.CompanyID, req.UserID)
 
 	connections.RLock()
-	_, exists := connections.clients[userClientID]
+	_, online := connections.clients[key]
 	connections.RUnlock()
 
-	response := map[string]interface{}{
-		"online": exists,
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"online": online,
 		"userId": req.UserID,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
-
-// HTTP endpoint to get active live sessions for admin
 func getActiveSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	companyID := r.URL.Query().Get("companyId")
 	adminID := r.URL.Query().Get("adminId")
 
 	activeSessions.RLock()
-	sessions := []map[string]interface{}{}
-	for sessionID, session := range activeSessions.sessions {
-		if session.AdminConnection != nil &&
-			session.AdminConnection.companyID == companyID &&
-			session.AdminConnection.userID == adminID &&
-			session.IsActive {
+	defer activeSessions.RUnlock()
+
+	var sessions []map[string]interface{}
+	for id, s := range activeSessions.sessions {
+		if s.AdminConnection != nil &&
+			s.AdminConnection.companyID == companyID &&
+			s.AdminConnection.userID == adminID &&
+			s.IsActive {
 			sessions = append(sessions, map[string]interface{}{
-				"sessionId": sessionID,
-				"userId":    session.UserConnection.userID,
-				"startedAt": session.StartedAt,
-				"duration":  time.Since(session.StartedAt).String(),
+				"sessionId": id,
+				"userId":    s.UserConnection.userID,
+				"startedAt": s.StartedAt.Format(time.RFC3339),
 			})
 		}
 	}
-	activeSessions.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sessions)
 }

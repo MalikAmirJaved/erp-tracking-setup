@@ -11,9 +11,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
-const baseDir = `D:\UsersTrackingScreenShots`
+const (
+	listenAddr     = ":3002"
+	baseDir        = `D:\UsersTrackingScreenShots`
+	maxUploadSize  = 80 << 20 // 80 MB
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
 
 type Config struct {
 	MaxUploadSize int64
@@ -21,26 +33,83 @@ type Config struct {
 }
 
 var config = Config{
-	MaxUploadSize: 50 << 20, // 50MB
+	MaxUploadSize: maxUploadSize,
 	BaseDir:       baseDir,
 }
 
+// ────────────────────────────────────────────────
+// Global state
+// ────────────────────────────────────────────────
+
+type Client struct {
+	conn      *websocket.Conn
+	peerID    string // format: "admin_user123" or "user_emp456"
+	userID    string
+	companyID string
+	role      string // "admin" or "user"
+}
+
+type LiveSession struct {
+	ID        string
+	Admin     *Client
+	User      *Client
+	StartedAt time.Time
+	Active    bool
+}
+
+var (
+	connections = struct {
+		sync.RWMutex
+		clients map[string]*Client // key = peerID
+	}{
+		clients: make(map[string]*Client),
+	}
+
+	activeSessions = struct {
+		sync.RWMutex
+		sessions map[string]*LiveSession // key = session ID
+	}{
+		sessions: make(map[string]*LiveSession),
+	}
+)
+
+// ────────────────────────────────────────────────
+// Message structure used in WebSocket
+// ────────────────────────────────────────────────
+
+type Message struct {
+	Type      string          `json:"type"`
+	From      string          `json:"from,omitempty"`
+	To        string          `json:"to,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	PeerID    string          `json:"peerId,omitempty"`
+	UserID    string          `json:"userId,omitempty"`
+	CompanyID string          `json:"companyId,omitempty"`
+}
+
+// ────────────────────────────────────────────────
+// Main entry point
+// ────────────────────────────────────────────────
+
 func main() {
-	if err := os.MkdirAll(config.BaseDir, os.ModePerm); err != nil {
-		os.Exit(1)
+	if err := os.MkdirAll(config.BaseDir, 0755); err != nil {
+		log.Fatal("Cannot create screenshot directory:", err)
 	}
 
 	http.HandleFunc("/upload-screenshot", uploadScreenshotHandler)
 	http.HandleFunc("/health", healthCheckHandler)
-	log.Printf("🚀 Screenshot server running on http://127.0.0.1:3002")
-	http.ListenAndServe(":3002", nil)
+	http.HandleFunc("/ws/live", signalingWebSocketHandler)
+	http.HandleFunc("/check-user-status", checkUserStatusHandler)
+
+	log.Printf("Server listening on http://localhost%s", listenAddr)
+	log.Printf("Signaling endpoint:        ws://localhost%s/ws/live", listenAddr)
+
+	log.Fatal(http.ListenAndServe(listenAddr, nil))
 }
 
-func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status": "ok", "service": "screenshot-server"}`)
-}
+// ────────────────────────────────────────────────
+// Screenshot upload endpoint
+// ────────────────────────────────────────────────
 
 func uploadScreenshotHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -48,9 +117,8 @@ func uploadScreenshotHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := r.ParseMultipartForm(config.MaxUploadSize)
-	if err != nil {
-		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+	if err := r.ParseMultipartForm(config.MaxUploadSize); err != nil {
+		http.Error(w, "File too large or bad form", http.StatusBadRequest)
 		return
 	}
 
@@ -70,95 +138,263 @@ func uploadScreenshotHandler(w http.ResponseWriter, r *http.Request) {
 
 	file, header, err := r.FormFile("screenshot")
 	if err != nil {
-		http.Error(w, "Failed to read file", http.StatusBadRequest)
+		http.Error(w, "Cannot read file", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
-	fileData, err := io.ReadAll(file)
+	data, err := io.ReadAll(file)
 	if err != nil {
-		http.Error(w, "Failed to read file data", http.StatusInternalServerError)
+		http.Error(w, "Cannot read file content", http.StatusInternalServerError)
 		return
 	}
 
 	if fileHash != "" {
-		calculatedHash := calculateFileHash(fileData)
-		if calculatedHash != fileHash {
-			http.Error(w, "File integrity check failed", http.StatusBadRequest)
+		calcHash := sha256.Sum256(data)
+		expected := base64.StdEncoding.EncodeToString(calcHash[:])
+		if expected != fileHash {
+			http.Error(w, "File hash mismatch", http.StatusBadRequest)
 			return
 		}
 	}
 
 	saveDir := filepath.Join(config.BaseDir, sanitize(companyId), sanitize(userId))
-	if err := os.MkdirAll(saveDir, os.ModePerm); err != nil {
-		http.Error(w, "Failed to create directory", http.StatusInternalServerError)
+	if err := os.MkdirAll(saveDir, 0755); err != nil {
+		http.Error(w, "Cannot create user directory", http.StatusInternalServerError)
 		return
 	}
 
-	fileExt := filepath.Ext(header.Filename)
-	if fileExt == "" {
-		if encrypted == "true" {
-			fileExt = ".enc"
-		} else {
-			fileExt = ".png"
-		}
+	ext := ".png"
+	if encrypted == "true" {
+		ext = ".enc"
+	}
+	if h := header.Filename; filepath.Ext(h) != "" {
+		ext = filepath.Ext(h)
 	}
 
-	fileName := fmt.Sprintf("%s__%s__%s__%s__%s__%s%s",
-		sanitize(companyId),
-		sanitize(userId),
-		sanitize(localIP),
-		sanitize(mac),
-		sanitize(timestamp),
-		sanitize(fileType),
-		fileExt,
-	)
+	filename := fmt.Sprintf("%s__%s__%s__%s__%s__%s%s",
+		sanitize(companyId), sanitize(userId), sanitize(localIP),
+		sanitize(mac), sanitize(timestamp), sanitize(fileType), ext)
 
-	savePath := filepath.Join(saveDir, fileName)
+	savePath := filepath.Join(saveDir, filename)
 
-	dst, err := os.Create(savePath)
-	if err != nil {
-		http.Error(w, "Failed to save file", http.StatusInternalServerError)
-		return
-	}
-	defer dst.Close()
-
-	_, err = dst.Write(fileData)
-	if err != nil {
-		http.Error(w, "Failed to write file", http.StatusInternalServerError)
+	if err := os.WriteFile(savePath, data, 0644); err != nil {
+		http.Error(w, "Cannot save file", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	response := map[string]interface{}{
-		"status":    "success",
-		"fileName":  fileName,
-		"fileSize":  len(fileData),
-		"encrypted": encrypted == "true",
-		"hash":      fileHash,
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "success",
+		"filename": filename,
+		"size":     len(data),
+	})
+}
+
+func sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(" /\\:*?\"<>|", r) {
+			return '_'
+		}
+		return r
+	}, s)
+}
+
+// ────────────────────────────────────────────────
+// Health check
+// ────────────────────────────────────────────────
+
+func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok","service":"screenshot+live-signaling"}`))
+}
+
+// ────────────────────────────────────────────────
+// WebSocket signaling endpoint (/ws/live)
+// ────────────────────────────────────────────────
+
+func signalingWebSocketHandler(w http.ResponseWriter, r *http.Request) {
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade failed:", err)
+		return
+	}
+	defer conn.Close()
+
+	var client *Client
+
+	for {
+		var msg Message
+		if err := conn.ReadJSON(&msg); err != nil {
+			break
+		}
+
+		switch msg.Type {
+		case "join-live":
+			var join struct {
+				From      string `json:"From"`
+				UserID    string `json:"UserID"`
+				CompanyID string `json:"CompanyID"`
+				PeerID    string `json:"PeerID"`
+			}
+			if err := json.Unmarshal(msg.Data, &join); err != nil {
+				conn.WriteJSON(Message{Type: "error", Data: json.RawMessage(`{"msg":"bad join format"}`)})
+				return
+			}
+
+			client = &Client{
+				conn:      conn,
+				peerID:    join.PeerID,
+				userID:    join.UserID,
+				companyID: join.CompanyID,
+				role:      join.From,
+			}
+
+			connections.Lock()
+			connections.clients[join.PeerID] = client
+			connections.Unlock()
+
+			conn.WriteJSON(Message{Type: "joined"})
+
+		case "request-live":
+			if client == nil || client.role != "admin" {
+				continue
+			}
+			var targetUser string
+			_ = json.Unmarshal(msg.Data, &targetUser)
+
+			targetPeer := "user_" + targetUser
+
+			connections.RLock()
+			target, ok := connections.clients[targetPeer]
+			connections.RUnlock()
+
+			if !ok {
+				conn.WriteJSON(Message{Type: "live-rejected", Data: json.RawMessage(`{"reason":"user offline"}`)})
+				continue
+			}
+
+			target.conn.WriteJSON(Message{
+				Type: "live-request",
+				From: client.userID,
+				Data: json.RawMessage(fmt.Sprintf(`{"adminId":"%s"}`, client.userID)),
+			})
+
+		case "accept-live":
+			if client == nil || client.role != "user" {
+				continue
+			}
+			var adminID string
+			_ = json.Unmarshal(msg.Data, &adminID)
+
+			adminPeer := "admin_" + adminID
+
+			connections.RLock()
+			admin, ok := connections.clients[adminPeer]
+			connections.RUnlock()
+
+			if !ok {
+				continue
+			}
+
+			sessionID := fmt.Sprintf("sess-%s-%s-%s", client.companyID, adminID, client.userID)
+
+			sess := &LiveSession{
+				ID:        sessionID,
+				Admin:     admin,
+				User:      client,
+				StartedAt: time.Now(),
+				Active:    true,
+			}
+
+			activeSessions.Lock()
+			activeSessions.sessions[sessionID] = sess
+			activeSessions.Unlock()
+
+			admin.conn.WriteJSON(Message{
+				Type: "live-accepted",
+				Data: json.RawMessage(fmt.Sprintf(`{"sessionId":"%s","userId":"%s"}`, sessionID, client.userID)),
+			})
+
+		case "reject-live":
+			// forward reject (you can implement similarly to accept)
+
+		case "end-live":
+			// forward end (you can implement similarly)
+
+		case "webrtc-offer", "webrtc-answer", "webrtc-candidate":
+			var target string
+			_ = json.Unmarshal(msg.Data, &struct{ To *string }{&target})
+			if target == "" {
+				continue
+			}
+
+			connections.RLock()
+			dest, ok := connections.clients[target]
+			connections.RUnlock()
+
+			if ok {
+				dest.conn.WriteJSON(msg)
+			}
+		}
 	}
 
-	json.NewEncoder(w).Encode(response)
+	// Cleanup on disconnect
+	if client != nil {
+		connections.Lock()
+		delete(connections.clients, client.peerID)
+		connections.Unlock()
+
+		// End sessions this client was in
+		activeSessions.Lock()
+		for id, s := range activeSessions.sessions {
+			if (s.Admin != nil && s.Admin.peerID == client.peerID) ||
+				(s.User != nil && s.User.peerID == client.peerID) {
+				s.Active = false
+				delete(activeSessions.sessions, id)
+
+				other := s.User
+				if client.role == "user" {
+					other = s.Admin
+				}
+				if other != nil && other.conn != nil {
+					other.conn.WriteJSON(Message{
+						Type: "session-ended",
+						Data: json.RawMessage(`{"reason":"peer disconnected"}`),
+					})
+				}
+			}
+		}
+		activeSessions.Unlock()
+	}
 }
 
-func calculateFileHash(data []byte) string {
-	hash := sha256.Sum256(data)
-	return base64.StdEncoding.EncodeToString(hash[:])
-}
+// ────────────────────────────────────────────────
+// Check if user is online
+// ────────────────────────────────────────────────
 
-func sanitize(input string) string {
-	replacer := strings.NewReplacer(
-		" ", "_",
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-	)
-	return replacer.Replace(input)
+func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		CompanyID string `json:"companyId"`
+		UserID    string `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	key := "user_" + req.UserID
+
+	connections.RLock()
+	_, online := connections.clients[key]
+	connections.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"online": online})
 }
