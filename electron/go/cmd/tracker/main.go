@@ -7,6 +7,11 @@ import (
 	"net/http"
 )
 
+// var (
+// 	localIP    string
+// 	macAddress string
+// )
+
 func main() {
 	// Initialize global values
 	localIP = getLocalIP()

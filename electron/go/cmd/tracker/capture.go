@@ -14,6 +14,7 @@ import (
 	"image/png"
 	"io"
 	"io/ioutil"
+	"log"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -23,10 +24,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/kbinani/screenshot"
 )
 
 const SERVER_URL = "http://127.0.0.1:3002/upload-screenshot"
+const WS_URL = "ws://127.0.0.1:3002/ws/live"
 
 var ENCRYPTION_KEY = []byte("this-is-32-byte-long-key-for-aes")
 
@@ -47,15 +50,92 @@ const (
 )
 
 var (
-	mu          sync.Mutex
-	isRunning   bool
-	isOnBreak   bool
-	ticker      *time.Ticker
-	stopChan    chan struct{}
-	currentUser *UserInfo
-	localIP     string
-	macAddress  string
+	mu            sync.Mutex
+	isRunning     bool
+	isOnBreak     bool
+	ticker        *time.Ticker
+	stopChan      chan struct{}
+	currentUser   *UserInfo
+	localIP       string
+	macAddress    string
+	wsConn        *websocket.Conn
+	wsMutex       sync.Mutex
 )
+
+// ────────────────────────────────────────────────
+// WebSocket management
+// ────────────────────────────────────────────────
+
+func connectWebSocket() bool {
+	mu.Lock()
+	user := currentUser
+	mu.Unlock()
+
+	if user == nil {
+		return false
+	}
+
+	wsMutex.Lock()
+	defer wsMutex.Unlock()
+
+	if wsConn != nil {
+		wsConn.Close()
+		wsConn = nil
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(WS_URL, nil)
+	if err != nil {
+		log.Printf("WebSocket connect failed: %v", err)
+		return false
+	}
+
+	peerID := "user_" + user.UserID
+	joinMsg := map[string]interface{}{
+		"type": "join-live",
+		"data": map[string]string{
+			"From":      "user",
+			"UserID":    user.UserID,
+			"CompanyID": user.CompanyID,
+			"PeerID":    peerID,
+		},
+	}
+	if err := conn.WriteJSON(joinMsg); err != nil {
+		conn.Close()
+		return false
+	}
+
+	var resp map[string]string
+	if err := conn.ReadJSON(&resp); err != nil || resp["type"] != "joined" {
+		conn.Close()
+		return false
+	}
+
+	wsConn = conn
+	log.Println("WebSocket connected to server")
+	go wsKeepAlive(conn)
+	return true
+}
+
+func wsKeepAlive(conn *websocket.Conn) {
+	for {
+		time.Sleep(30 * time.Second)
+		wsMutex.Lock()
+		if conn == wsConn {
+			conn.WriteMessage(websocket.PingMessage, nil)
+		}
+		wsMutex.Unlock()
+	}
+}
+
+func closeWebSocket() {
+	wsMutex.Lock()
+	if wsConn != nil {
+		wsConn.Close()
+		wsConn = nil
+		log.Println("WebSocket disconnected")
+	}
+	wsMutex.Unlock()
+}
 
 // ────────────────────────────────────────────────
 // Helpers
@@ -276,7 +356,7 @@ func stopCaptureLoop() {
 }
 
 // ────────────────────────────────────────────────
-// HTTP Handlers
+// HTTP Handlers (updated)
 // ────────────────────────────────────────────────
 
 func setUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -303,9 +383,10 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.Lock()
-	isOnBreak = false
-	mu.Unlock()
+	if !connectWebSocket() {
+		http.Error(w, "cannot connect to server", http.StatusServiceUnavailable)
+		return
+	}
 
 	if err := CaptureScreen(CaptureStart); err != nil {
 		http.Error(w, "capture failed", http.StatusInternalServerError)
@@ -317,15 +398,13 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
-	mu.Lock()
 	wasRunning := isRunning
-	mu.Unlock()
-
 	if wasRunning {
 		CaptureScreen(CaptureStop)
 	}
 
 	stopCaptureLoop()
+	closeWebSocket()
 	w.Write([]byte("stopped"))
 }
 
@@ -335,6 +414,7 @@ func breakHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	CaptureScreen(CaptureBreak)
+	closeWebSocket()
 	w.Write([]byte("on break"))
 }
 
@@ -342,6 +422,11 @@ func resumeHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	isOnBreak = false
 	mu.Unlock()
+
+	if !connectWebSocket() {
+		http.Error(w, "cannot connect to server", http.StatusServiceUnavailable)
+		return
+	}
 
 	CaptureScreen(CaptureResume)
 

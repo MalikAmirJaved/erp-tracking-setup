@@ -1,3 +1,5 @@
+// Go server
+
 package main
 
 import (
@@ -18,9 +20,9 @@ import (
 )
 
 const (
-	listenAddr     = ":3002"
-	baseDir        = `D:\UsersTrackingScreenShots`
-	maxUploadSize  = 80 << 20 // 80 MB
+	listenAddr    = ":3002"
+	baseDir       = `D:\UsersTrackingScreenShots`
+	maxUploadSize = 80 << 20 // 80 MB
 )
 
 var upgrader = websocket.Upgrader{
@@ -258,27 +260,54 @@ func signalingWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			conn.WriteJSON(Message{Type: "joined"})
 
 		case "request-live":
-			if client == nil || client.role != "admin" {
+			if client.role != "admin" {
 				continue
 			}
-			var targetUser string
-			_ = json.Unmarshal(msg.Data, &targetUser)
 
-			targetPeer := "user_" + targetUser
+			var targetUserID string
+			_ = json.Unmarshal(msg.Data, &targetUserID)
+
+			targetPeer := "user_" + targetUserID
 
 			connections.RLock()
-			target, ok := connections.clients[targetPeer]
+			target, exists := connections.clients[targetPeer]
 			connections.RUnlock()
 
-			if !ok {
-				conn.WriteJSON(Message{Type: "live-rejected", Data: json.RawMessage(`{"reason":"user offline"}`)})
+			if !exists {
+				// User offline → tell admin immediately
+				client.conn.WriteJSON(Message{
+					Type: "live-not-available",
+					Data: json.RawMessage(`{"reason":"user-offline","userId":"` + targetUserID + `"}`),
+				})
 				continue
 			}
 
+			// ── Auto accept ───────────────────────────────────────
+			sessionID := fmt.Sprintf("sess-%s-%s-%s", client.companyID, client.userID, targetUserID)
+
+			sess := &LiveSession{
+				ID:        sessionID,
+				Admin:     client,
+				User:      target,
+				StartedAt: time.Now(),
+				Active:    true,
+			}
+
+			activeSessions.Lock()
+			activeSessions.sessions[sessionID] = sess
+			activeSessions.Unlock()
+
+			// Tell admin: session created, waiting for WebRTC
+			client.conn.WriteJSON(Message{
+				Type: "live-auto-accepted",
+				Data: json.RawMessage(fmt.Sprintf(`{"sessionId":"%s","userId":"%s"}`, sessionID, targetUserID)),
+			})
+
+			// Tell user: monitoring starting (optional – can be silent)
 			target.conn.WriteJSON(Message{
-				Type: "live-request",
-				From: client.userID,
-				Data: json.RawMessage(fmt.Sprintf(`{"adminId":"%s"}`, client.userID)),
+				Type: "monitoring-started",
+				From: client.userID, // admin id
+				Data: json.RawMessage(`{"adminId":"` + client.userID + `","sessionId":"` + sessionID + `"}`),
 			})
 
 		case "accept-live":
@@ -374,7 +403,7 @@ func signalingWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 // Check if user is online
 // ────────────────────────────────────────────────
 
-func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
+func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) { 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
