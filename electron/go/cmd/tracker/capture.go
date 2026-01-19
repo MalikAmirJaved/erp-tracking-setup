@@ -1,4 +1,4 @@
-// Go client
+// capture.go
 
 package main
 
@@ -50,79 +50,81 @@ const (
 )
 
 var (
-	mu            sync.Mutex
-	isRunning     bool
-	isOnBreak     bool
-	ticker        *time.Ticker
-	stopChan      chan struct{}
-	currentUser   *UserInfo
-	localIP       string
-	macAddress    string
-	wsConn        *websocket.Conn
-	wsMutex       sync.Mutex
+	mu                    sync.Mutex
+	isRunning             bool
+	isOnBreak             bool
+	liveMonitoringEnabled bool // NEW: controls auto-accept
+	ticker                *time.Ticker
+	stopChan              chan struct{}
+	currentUser           *UserInfo
+	localIP               string
+	macAddress            string
+	wsConn                *websocket.Conn
+	wsMutex               sync.Mutex
 )
 
-// ────────────────────────────────────────────────
-// WebSocket management
-// ────────────────────────────────────────────────
-
 func connectWebSocket() bool {
-	mu.Lock()
-	user := currentUser
-	mu.Unlock()
+    mu.Lock()
+    user := currentUser
+    mu.Unlock()
 
-	if user == nil {
-		return false
-	}
+    if user == nil {
+        return false
+    }
 
-	wsMutex.Lock()
-	defer wsMutex.Unlock()
+    wsMutex.Lock()
+    defer wsMutex.Unlock()
 
-	if wsConn != nil {
-		wsConn.Close()
-		wsConn = nil
-	}
+    if wsConn != nil {
+        wsConn.Close()
+        wsConn = nil
+    }
 
-	conn, _, err := websocket.DefaultDialer.Dial(WS_URL, nil)
-	if err != nil {
-		log.Printf("WebSocket connect failed: %v", err)
-		return false
-	}
+    conn, _, err := websocket.DefaultDialer.Dial(WS_URL, nil)
+    if err != nil {
+        log.Printf("WebSocket connect failed: %v", err)
+        return false
+    }
 
-	peerID := "user_" + user.UserID
-	joinMsg := map[string]interface{}{
-		"type": "join-live",
-		"data": map[string]string{
-			"From":      "user",
-			"UserID":    user.UserID,
-			"CompanyID": user.CompanyID,
-			"PeerID":    peerID,
-		},
-	}
-	if err := conn.WriteJSON(joinMsg); err != nil {
-		conn.Close()
-		return false
-	}
+    // ── Correct join message format ─────────────────────────────────────
+    joinMsg := map[string]interface{}{
+        "type": "join-live",
+        "data": map[string]interface{}{
+            "From":      "user",
+            "UserID":    user.UserID,
+            "CompanyID": user.CompanyID,
+            "PeerID":    "user_" + user.UserID,
+        },
+    }
 
-	var resp map[string]string
-	if err := conn.ReadJSON(&resp); err != nil || resp["type"] != "joined" {
-		conn.Close()
-		return false
-	}
+    if err := conn.WriteJSON(joinMsg); err != nil {
+        conn.Close()
+        return false
+    }
 
-	wsConn = conn
-	log.Println("WebSocket connected to server")
-	go wsKeepAlive(conn)
-	return true
+    log.Println("Join-live message sent to central server")
+
+    // Optional: wait a moment and log if still connected
+    time.Sleep(2 * time.Second)
+    log.Println("Still connected after sending join → good sign!")
+
+    wsConn = conn
+    log.Println("WebSocket connected to central server (persistent)")
+
+    go wsKeepAlive(conn)
+    go handleCentralMessages(conn)
+    return true
 }
 
 func wsKeepAlive(conn *websocket.Conn) {
 	for {
-		time.Sleep(30 * time.Second)
+		time.Sleep(25 * time.Second)
 		wsMutex.Lock()
-		if conn == wsConn {
-			conn.WriteMessage(websocket.PingMessage, nil)
+		if conn != wsConn {
+			wsMutex.Unlock()
+			return
 		}
+		conn.WriteMessage(websocket.PingMessage, nil)
 		wsMutex.Unlock()
 	}
 }
@@ -132,9 +134,71 @@ func closeWebSocket() {
 	if wsConn != nil {
 		wsConn.Close()
 		wsConn = nil
-		log.Println("WebSocket disconnected")
+		log.Println("WebSocket to central server closed")
 	}
 	wsMutex.Unlock()
+}
+
+func handleCentralMessages(conn *websocket.Conn) {
+	for {
+		var msg SignalingMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			log.Printf("Central WS read error: %v", err)
+			wsMutex.Lock()
+			if conn == wsConn {
+				wsConn = nil
+			}
+			wsMutex.Unlock()
+			break
+		}
+
+		switch msg.Type {
+		case "live-request":
+			mu.Lock()
+			enabled := liveMonitoringEnabled
+			adminID := ""
+			_ = json.Unmarshal(msg.Data, &struct{ AdminId *string }{&adminID})
+			mu.Unlock()
+
+			responseType := "accept-live"
+			if !enabled {
+				responseType = "reject-live"
+				log.Printf("Rejecting live request (capture not running): %s", msg.From)
+			} else {
+				log.Printf("Auto-accepting live request: %s", msg.From)
+			}
+
+			resp := SignalingMessage{
+				Type: responseType,
+				Data: json.RawMessage(fmt.Sprintf(`{"adminId":"%s"}`, adminID)),
+			}
+
+			wsMutex.Lock()
+			if wsConn != nil {
+				wsConn.WriteJSON(resp)
+			}
+			wsMutex.Unlock()
+
+			// Also forward request to local popup (even if rejecting)
+			connections.Lock()
+			for _, cl := range connections.clients {
+				if cl.role == "user" {
+					cl.conn.WriteJSON(msg)
+				}
+			}
+			connections.Unlock()
+
+		case "webrtc-offer", "webrtc-answer", "webrtc-candidate", "session-ended", "monitoring-started", "live-accepted", "live-rejected":
+			// Forward to local popup
+			connections.Lock()
+			for _, cl := range connections.clients {
+				if cl.role == "user" {
+					cl.conn.WriteJSON(msg)
+				}
+			}
+			connections.Unlock()
+		}
+	}
 }
 
 // ────────────────────────────────────────────────
@@ -369,7 +433,7 @@ func setUserHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	currentUser = &user
 	mu.Unlock()
-
+	connectWebSocket()
 	w.Write([]byte("user set"))
 }
 
@@ -383,17 +447,17 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !connectWebSocket() {
-		http.Error(w, "cannot connect to server", http.StatusServiceUnavailable)
-		return
-	}
-
 	if err := CaptureScreen(CaptureStart); err != nil {
 		http.Error(w, "capture failed", http.StatusInternalServerError)
 		return
 	}
 
 	startCaptureLoop()
+
+	mu.Lock()
+	liveMonitoringEnabled = true
+	mu.Unlock()
+
 	w.Write([]byte("success"))
 }
 

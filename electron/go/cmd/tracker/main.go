@@ -1,4 +1,4 @@
-// Go client
+// main.go
 
 package main
 
@@ -6,11 +6,6 @@ import (
 	"log"
 	"net/http"
 )
-
-// var (
-// 	localIP    string
-// 	macAddress string
-// )
 
 func main() {
 	// Initialize global values
@@ -26,7 +21,7 @@ func main() {
 	mux.HandleFunc("/break", breakHandler)
 	mux.HandleFunc("/resume", resumeHandler)
 	mux.HandleFunc("/status", statusHandler)
-	
+
 	// Live monitoring routes
 	mux.HandleFunc("/ws-live", liveMonitoringWebSocket)
 	mux.HandleFunc("/active-sessions", getActiveSessionsHandler)

@@ -439,7 +439,6 @@ func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
 func logAllActiveUsers() {
 	connections.RLock()
 	defer connections.RUnlock()
@@ -462,7 +461,6 @@ func logAllActiveUsers() {
 	}
 }
 
-
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
@@ -475,6 +473,7 @@ func withCORS(next http.Handler) http.Handler {
 		// Handle preflight
 		if r.Method == http.MethodOptions {
 			log.Println("✅ CORS preflight:", r.URL.Path)
+			log.Println("✅ CORS rrrr   j:", r)
 			w.WriteHeader(http.StatusOK)
 			return
 		}

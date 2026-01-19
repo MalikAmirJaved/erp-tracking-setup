@@ -9,12 +9,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+const CENTRAL_WS_URL = "ws://192.168.88.33:3002/ws/live"
+
+var centralConn *websocket.Conn
+var centralConnMu sync.Mutex
 var (
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -64,7 +69,96 @@ type SignalingMessage struct {
 	CompanyID string          `json:"companyId,omitempty"`
 }
 
-// WebSocket handler for live monitoring (employee agent side)
+func connectToCentralServer() {
+	centralConnMu.Lock()
+	if centralConn != nil {
+		centralConn.Close()
+	}
+	centralConnMu.Unlock()
+
+	for {
+		conn, _, err := websocket.DefaultDialer.Dial(CENTRAL_WS_URL, nil)
+		if err != nil {
+			// log.Printf("Cannot connect to central signaling server: %v — retry in 8s", err)
+			time.Sleep(8 * time.Second)
+			continue
+		}
+
+		// log.Println("Connected to central signaling server")
+
+		centralConnMu.Lock()
+		centralConn = conn
+		centralConnMu.Unlock()
+
+		// Join as user
+		mu.Lock()
+		u := currentUser
+		mu.Unlock()
+
+		if u == nil {
+			conn.Close()
+			continue
+		}
+
+		join := map[string]interface{}{
+			"type": "join-live",
+			"data": map[string]string{
+				"From":      "user",
+				"UserID":    u.UserID,
+				"CompanyID": u.CompanyID,
+				"PeerID":    "user_" + u.UserID,
+			},
+		}
+
+		if err := conn.WriteJSON(join); err != nil {
+			conn.Close()
+			continue
+		}
+
+		// Forward messages from central → local popup
+		go func() {
+			for {
+				var msg map[string]interface{}
+				if err := conn.ReadJSON(&msg); err != nil {
+					log.Printf("Central WS read error: %v", err)
+					centralConnMu.Lock()
+					if conn == centralConn {
+						centralConn = nil
+					}
+					centralConnMu.Unlock()
+					break
+				}
+
+				// Forward important messages to all connected local clients (popups)
+				connections.RLock()
+				for _, c := range connections.clients {
+					_ = c.conn.WriteJSON(msg)
+				}
+				connections.RUnlock()
+
+			}
+		}()
+
+		// Keep connection alive
+		go func() {
+			for {
+				time.Sleep(25 * time.Second)
+				centralConnMu.Lock()
+				if conn != centralConn {
+					centralConnMu.Unlock()
+					return
+				}
+				conn.WriteMessage(websocket.PingMessage, nil)
+				centralConnMu.Unlock()
+			}
+		}()
+
+		// Wait for disconnect
+		<-time.After(365 * 24 * time.Hour) // practically forever
+	}
+}
+
+// WebSocket handler for local popup (localhost:9090/ws-live)
 func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -96,7 +190,7 @@ func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn:      conn,
 		userID:    joinMsg.UserID,
 		companyID: joinMsg.CompanyID,
-		role:      joinMsg.From, // admin | user
+		role:      joinMsg.From,
 		peerID:    peerID,
 	}
 
@@ -104,7 +198,7 @@ func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 	connections.clients[peerID] = client
 	connections.Unlock()
 
-	log.Printf("🟢 Live client connected: %s (%s)", peerID, client.role)
+	log.Printf("🟢 Local popup connected: %s (%s)", peerID, client.role)
 
 	conn.WriteJSON(SignalingMessage{
 		Type: "connected",
@@ -114,10 +208,20 @@ func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		var msg SignalingMessage
 		if err := conn.ReadJSON(&msg); err != nil {
-			log.Printf("🔴 WebSocket closed: %s (%v)", peerID, err)
+			log.Printf("🔴 Local popup disconnected: %s (%v)", peerID, err)
 			break
 		}
-		handleSignalingMessage(client, msg)
+
+		// Forward messages from popup to central (mainly accept/reject/offer/answer/candidate)
+		if msg.Type == "accept-live" || msg.Type == "reject-live" ||
+			strings.HasPrefix(msg.Type, "webrtc-") {
+			wsMutex.Lock()
+			if wsConn != nil {
+				msg.From = peerID
+				wsConn.WriteJSON(msg)
+			}
+			wsMutex.Unlock()
+		}
 	}
 
 	connections.Lock()
@@ -125,19 +229,29 @@ func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 	connections.Unlock()
 
 	cleanupSessionsForClient(client)
-
-	log.Printf("⚫ Live client disconnected: %s", peerID)
+	log.Printf("⚫ Local popup disconnected: %s", peerID)
 }
-
 
 func handleSignalingMessage(client *ClientConnection, msg SignalingMessage) {
 	switch msg.Type {
-	case "request-live":
-		// Only admins should send this — ignore if not admin
-		if client.role != "admin" {
+
+	case "live-request":
+		if !liveMonitoringEnabled {
+			client.conn.WriteJSON(SignalingMessage{
+				Type: "live-rejected",
+				Data: json.RawMessage(`{"reason":"monitoring-disabled"}`),
+			})
 			return
 		}
-		handleLiveRequest(client, msg)
+
+		// auto-accept
+		adminID := strings.TrimPrefix(msg.From, "admin_")
+
+		client.conn.WriteJSON(SignalingMessage{
+			Type: "accept-live",
+			Data: json.RawMessage(fmt.Sprintf(`"%s"`, adminID)),
+		})
+		return
 
 	case "accept-live":
 		if client.role != "user" {
@@ -172,18 +286,22 @@ func forwardToTarget(sender *ClientConnection, msg SignalingMessage) {
 	target, exists := connections.clients[payload.To]
 	connections.RUnlock()
 
-	if !exists {
-		log.Printf("⚠️ Target not found: %s", payload.To)
+	if exists {
+		msg.From = sender.peerID
+		target.conn.WriteJSON(msg)
 		return
 	}
 
-	msg.From = sender.peerID
-
-	if err := target.conn.WriteJSON(msg); err != nil {
-		log.Printf("❌ Forward failed (%s → %s): %v", sender.peerID, payload.To, err)
+	// If target is remote (admin), forward to central server
+	if strings.HasPrefix(payload.To, "admin_") {
+		wsMutex.Lock()
+		if wsConn != nil {
+			msg.From = sender.peerID
+			wsConn.WriteJSON(msg)
+		}
+		wsMutex.Unlock()
 	}
 }
-
 
 func handleLiveRequest(admin *ClientConnection, msg SignalingMessage) {
 	var payload struct {
@@ -219,8 +337,6 @@ func handleLiveRequest(admin *ClientConnection, msg SignalingMessage) {
 		Data:      json.RawMessage(fmt.Sprintf(`{"adminId":"%s"}`, admin.userID)),
 	})
 }
-
-
 
 func handleLiveAccept(user *ClientConnection, msg SignalingMessage) {
 	var adminID string
@@ -260,8 +376,6 @@ func handleLiveAccept(user *ClientConnection, msg SignalingMessage) {
 		Data: json.RawMessage(fmt.Sprintf(`{"sessionId":"%s","userId":"%s"}`, sessionID, user.userID)),
 	})
 }
-
-
 
 func handleLiveReject(user *ClientConnection, msg SignalingMessage) {
 	var adminID string
