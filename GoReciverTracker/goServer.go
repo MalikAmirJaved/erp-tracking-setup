@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	listenAddr    = ":3002"
+	listenAddr    = "192.168.88.33:3002"
 	baseDir       = `D:\UsersTrackingScreenShots`
 	maxUploadSize = 80 << 20 // 80 MB
 )
@@ -105,7 +105,7 @@ func main() {
 	mux.HandleFunc("/ws/live", signalingWebSocketHandler)
 	mux.HandleFunc("/check-user-status", checkUserStatusHandler)
 
-	log.Printf("Server listening on http://localhost%s", listenAddr)
+	log.Printf("Server listening on %s", listenAddr)
 
 	// ✅ Wrap with CORS
 	handler := withCORS(mux)
@@ -421,23 +421,24 @@ func checkUserStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		http.Error(w, "Invalid body", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("📡 company=%s user=%s\n", req.CompanyID, req.UserID)
-
-	key := "user_" + req.UserID
+	targetPeer := "user_" + req.UserID
 
 	connections.RLock()
-	_, online := connections.clients[key]
+	_, exists := connections.clients[targetPeer]
 	connections.RUnlock()
-logAllActiveUsers()
+
+	log.Printf("🟢 Online check: %s → %v", targetPeer, exists)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{
-		"online": online,
+		"online": exists,
 	})
 }
+
 
 func logAllActiveUsers() {
 	connections.RLock()
@@ -466,7 +467,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 		// Allow your frontend
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3001")
+		w.Header().Set("Access-Control-Allow-Origin", "http://192.168.88.33:3001")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")

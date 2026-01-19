@@ -68,68 +68,67 @@ type SignalingMessage struct {
 func liveMonitoringWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
+		log.Println("WebSocket upgrade failed:", err)
 		return
 	}
 	defer conn.Close()
 
-	var initMsg SignalingMessage
-	if err := conn.ReadJSON(&initMsg); err != nil {
-		log.Printf("Failed to read initial join message: %v", err)
+	var joinMsg SignalingMessage
+	if err := conn.ReadJSON(&joinMsg); err != nil {
+		log.Println("Failed to read join message:", err)
 		return
 	}
 
-	if initMsg.Type != "join-live" || initMsg.UserID == "" || initMsg.CompanyID == "" || initMsg.PeerID == "" {
+	if joinMsg.Type != "join-live" ||
+		joinMsg.UserID == "" ||
+		joinMsg.CompanyID == "" ||
+		joinMsg.From == "" {
 		conn.WriteJSON(SignalingMessage{
 			Type: "error",
-			Data: json.RawMessage(`{"message":"invalid join message"}`),
+			Data: json.RawMessage(`{"msg":"invalid join message"}`),
 		})
 		return
 	}
 
+	peerID := fmt.Sprintf("%s_%s", joinMsg.From, joinMsg.UserID)
+
 	client := &ClientConnection{
 		conn:      conn,
-		userID:    initMsg.UserID,
-		companyID: initMsg.CompanyID,
-		role:      initMsg.From, // "admin" or "user"
-		peerID:    initMsg.PeerID,
+		userID:    joinMsg.UserID,
+		companyID: joinMsg.CompanyID,
+		role:      joinMsg.From, // admin | user
+		peerID:    peerID,
 	}
 
-	clientKey := fmt.Sprintf("%s_%s_%s", initMsg.CompanyID, initMsg.UserID, initMsg.From)
-
 	connections.Lock()
-	connections.clients[clientKey] = client
+	connections.clients[peerID] = client
 	connections.Unlock()
 
-	log.Printf("Live monitoring client connected: %s (role: %s)", clientKey, client.role)
+	log.Printf("🟢 Live client connected: %s (%s)", peerID, client.role)
 
-	// Send confirmation
 	conn.WriteJSON(SignalingMessage{
 		Type: "connected",
-		From: "server",
-		Data: json.RawMessage(fmt.Sprintf(`{"clientId":"%s"}`, clientKey)),
+		Data: json.RawMessage(fmt.Sprintf(`{"peerId":"%s"}`, peerID)),
 	})
 
-	// Message loop
 	for {
 		var msg SignalingMessage
 		if err := conn.ReadJSON(&msg); err != nil {
-			log.Printf("WebSocket read error for %s: %v", clientKey, err)
+			log.Printf("🔴 WebSocket closed: %s (%v)", peerID, err)
 			break
 		}
-
 		handleSignalingMessage(client, msg)
 	}
 
-	// Cleanup
 	connections.Lock()
-	delete(connections.clients, clientKey)
+	delete(connections.clients, peerID)
 	connections.Unlock()
 
 	cleanupSessionsForClient(client)
 
-	log.Printf("Live monitoring client disconnected: %s", clientKey)
+	log.Printf("⚫ Live client disconnected: %s", peerID)
 }
+
 
 func handleSignalingMessage(client *ClientConnection, msg SignalingMessage) {
 	switch msg.Type {
@@ -161,43 +160,45 @@ func handleSignalingMessage(client *ClientConnection, msg SignalingMessage) {
 }
 
 func forwardToTarget(sender *ClientConnection, msg SignalingMessage) {
-	var targetPeer string
-	switch msg.Type {
-	case "webrtc-offer", "webrtc-answer", "webrtc-candidate":
-		var payload struct {
-			To string `json:"to"`
-		}
-		if err := json.Unmarshal(msg.Data, &payload); err == nil && payload.To != "" {
-			targetPeer = payload.To
-		}
+	var payload struct {
+		To string `json:"to"`
 	}
 
-	if targetPeer == "" {
+	if err := json.Unmarshal(msg.Data, &payload); err != nil || payload.To == "" {
 		return
 	}
 
 	connections.RLock()
-	target, exists := connections.clients[targetPeer]
+	target, exists := connections.clients[payload.To]
 	connections.RUnlock()
 
-	if exists && target.conn != nil {
-		msg.From = sender.peerID
-		if err := target.conn.WriteJSON(msg); err != nil {
-			log.Printf("Failed to forward %s to %s: %v", msg.Type, targetPeer, err)
-		}
+	if !exists {
+		log.Printf("⚠️ Target not found: %s", payload.To)
+		return
+	}
+
+	msg.From = sender.peerID
+
+	if err := target.conn.WriteJSON(msg); err != nil {
+		log.Printf("❌ Forward failed (%s → %s): %v", sender.peerID, payload.To, err)
 	}
 }
 
+
 func handleLiveRequest(admin *ClientConnection, msg SignalingMessage) {
-	var targetUserID string
-	if err := json.Unmarshal(msg.Data, &targetUserID); err != nil {
+	var payload struct {
+		UserID string `json:"userId"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Println("Invalid request-live payload:", err)
 		return
 	}
 
-	userKey := fmt.Sprintf("%s_%s_user", admin.companyID, targetUserID)
+	targetPeer := "user_" + payload.UserID
 
 	connections.RLock()
-	userConn, exists := connections.clients[userKey]
+	userConn, exists := connections.clients[targetPeer]
 	connections.RUnlock()
 
 	if !exists {
@@ -208,14 +209,18 @@ func handleLiveRequest(admin *ClientConnection, msg SignalingMessage) {
 		return
 	}
 
+	log.Printf("📡 Live request: admin=%s → user=%s", admin.userID, payload.UserID)
+
 	userConn.conn.WriteJSON(SignalingMessage{
 		Type:      "live-request",
-		From:      admin.userID,
-		To:        targetUserID,
+		From:      admin.peerID,
+		To:        targetPeer,
 		CompanyID: admin.companyID,
 		Data:      json.RawMessage(fmt.Sprintf(`{"adminId":"%s"}`, admin.userID)),
 	})
 }
+
+
 
 func handleLiveAccept(user *ClientConnection, msg SignalingMessage) {
 	var adminID string
@@ -223,17 +228,21 @@ func handleLiveAccept(user *ClientConnection, msg SignalingMessage) {
 		return
 	}
 
-	adminKey := fmt.Sprintf("%s_%s_admin", user.companyID, adminID)
+	adminPeer := "admin_" + adminID
 
 	connections.RLock()
-	adminConn, ok := connections.clients[adminKey]
+	adminConn, ok := connections.clients[adminPeer]
 	connections.RUnlock()
 
 	if !ok {
 		return
 	}
 
-	sessionID := fmt.Sprintf("sess_%s_%s_%s", user.companyID, adminID, user.userID)
+	sessionID := fmt.Sprintf("sess_%s_%s_%s",
+		user.companyID,
+		adminConn.userID,
+		user.userID,
+	)
 
 	session := &LiveSession{
 		AdminConnection: adminConn,
@@ -248,10 +257,11 @@ func handleLiveAccept(user *ClientConnection, msg SignalingMessage) {
 
 	adminConn.conn.WriteJSON(SignalingMessage{
 		Type: "live-accepted",
-		From: user.userID,
 		Data: json.RawMessage(fmt.Sprintf(`{"sessionId":"%s","userId":"%s"}`, sessionID, user.userID)),
 	})
 }
+
+
 
 func handleLiveReject(user *ClientConnection, msg SignalingMessage) {
 	var adminID string

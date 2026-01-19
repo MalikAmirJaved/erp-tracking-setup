@@ -16,7 +16,7 @@ let trackerProcess = null;
 let currentUser = store.get("user") || null;
 
 app.commandLine.appendSwitch("ignore-certificate-errors");
-app.commandLine.appendSwitch("allow-insecure-localhost");
+app.commandLine.appendSwitch("allow-insecure-192.168.88.33");
 app.setAsDefaultProtocolClient("erpmonitoring");
 
 function initAutoUpdater() {
@@ -222,7 +222,7 @@ function createWindow() {
   if (app.isPackaged) {
     mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
   } else {
-    mainWindow.loadURL("http://localhost:4000");
+    mainWindow.loadURL("http://192.168.88.33:4000");
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 

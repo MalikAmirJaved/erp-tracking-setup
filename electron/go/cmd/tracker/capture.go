@@ -28,8 +28,8 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
-const SERVER_URL = "http://127.0.0.1:3002/upload-screenshot"
-const WS_URL = "ws://127.0.0.1:3002/ws/live"
+const SERVER_URL = "http://192.168.88.33:3002/upload-screenshot"
+const WS_URL = "ws://192.168.88.33:3002/ws/live"
 
 var ENCRYPTION_KEY = []byte("this-is-32-byte-long-key-for-aes")
 
